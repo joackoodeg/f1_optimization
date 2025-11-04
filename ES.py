@@ -1,0 +1,551 @@
+import os
+import numpy as np
+import pandas as pd
+import random
+from deap import base, creator, tools
+import fastf1
+import joblib
+import warnings
+warnings.filterwarnings("ignore")
+
+# Importar funciones y variables desde utils/ES/main.py
+from utils.ES.main import (
+    YEAR, GP, DRIVER, CANT_VUELTAS,
+    POP_SIZE, NGEN, PMUT,
+    PIT_STOP_TIME,
+    MAX_LAPS_BY_COMPOUND,
+    reference_conditions,
+    model, features, metadata,
+    predict_lap_time
+)
+
+creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMin)
+
+toolbox = base.Toolbox()
+
+def create_individual():
+    """
+    Crea un individuo (estrategia) aleatorio respetando límites de degradación
+    genTyreCompound: lista de compuestos por vuelta (SOFT, MEDIUM, HARD)
+    """
+    genTyreCompound = []
+    PitStop = []
+    TyreAge = []
+    NumPitStop = 0
+
+    # Mapeo de enteros a compuestos
+    compound_names = ["SOFT", "MEDIUM", "HARD"]
+    compound = compound_names[random.randint(0, 2)]
+    genTyreCompound.append(compound)
+    TyreAge.append(0)
+    PitStop.append(0)
+    
+    # Contador de vueltas en el stint actual
+    stint_laps = 1
+    max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
+
+    for lap in range(1, CANT_VUELTAS):
+        # Si el stint actual se acerca al límite, forzar pit stop
+        if stint_laps >= max_laps_current * 0.95:  # A los 95% del límite, cambiar
+            new_compound = random.choice([c for c in compound_names if c != compound])
+            compound = new_compound
+            genTyreCompound.append(compound)
+            TyreAge.append(0)
+            PitStop.append(1)
+            NumPitStop += 1
+            stint_laps = 1
+            max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
+        else:
+            # Probabilidad de hacer pit stop (mayor si el stint es largo)
+            prob_pit = 0.05 + (stint_laps / max_laps_current) * 0.15  # 5% base, hasta 20%
+            newTyre = np.random.choice([True, False], p=[prob_pit, 1 - prob_pit])
+            
+            if newTyre:
+                # Elegir nuevo compuesto (evitar el mismo)
+                new_compound = random.choice([c for c in compound_names if c != compound])
+                compound = new_compound
+                genTyreCompound.append(compound)
+                TyreAge.append(0)
+                PitStop.append(1)
+                NumPitStop += 1
+                stint_laps = 1
+                max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
+            else:
+                genTyreCompound.append(compound)
+                TyreAge.append(TyreAge[-1] + 1)
+                PitStop.append(0)
+                stint_laps += 1
+
+    ind = creator.Individual([genTyreCompound])
+    ind.PitStop = PitStop
+    ind.TyreAge = TyreAge
+    ind.NumPitStop = NumPitStop
+    ind.Valid = validar_estrategia(ind)
+    return ind
+
+toolbox.register("individual", create_individual)
+toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+
+def validar_estrategia(individual):
+    """
+    Valida que la estrategia cumpla con las reglas de F1:
+    - Al menos un pit stop
+    - Al menos dos tipos de neumáticos diferentes
+    - Ningún stint excede el límite máximo de vueltas por compuesto
+    """
+    gen = individual[0]
+    tipos_usados = set(gen)
+    
+    # Validación básica
+    if individual.NumPitStop == 0 or len(tipos_usados) < 2:
+        return False
+    
+    # Validar límites de degradación por stint
+    current_compound = gen[0]
+    stint_start = 0
+    
+    for lap in range(1, len(gen)):
+        if gen[lap] != current_compound:
+            # Fin de stint (cambio de compuesto)
+            stint_length = lap - stint_start
+            max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
+            
+            # Si excede el límite, la estrategia es inválida
+            if stint_length > max_laps:
+                return False
+            
+            current_compound = gen[lap]
+            stint_start = lap
+    
+    # Verificar último stint (hasta el final)
+    if stint_start < len(gen):
+        stint_length = len(gen) - stint_start
+        max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
+        if stint_length > max_laps:
+            return False
+    
+    return True
+
+def func_aptitud(individual):
+    """
+    Función de aptitud: minimizar tiempo total de carrera
+    Usa el modelo predictivo para estimar tiempos de vuelta
+    Penaliza estrategias que excedan límites de degradación
+    """
+    # Validar primero
+    individual.Valid = validar_estrategia(individual)
+    
+    if not individual.Valid:
+        return (1e6,)  # Penalización enorme si no es válida
+    
+    total_time = 0.0
+    
+    # Penalización adicional por acercarse a límites de degradación
+    gen = individual[0]
+    current_compound = gen[0]
+    stint_start = 0
+    degradation_penalty = 0.0
+    
+    for lap in range(1, len(gen)):
+        if gen[lap] != current_compound:
+            # Fin de stint (cambio de compuesto)
+            stint_length = lap - stint_start
+            max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
+            
+            # Penalización progresiva si se acerca al límite
+            if stint_length > max_laps * 0.9:  # Último 10% del límite
+                penalty_factor = (stint_length / max_laps) ** 2
+                degradation_penalty += penalty_factor * 10.0  # Penalización de tiempo
+            
+            current_compound = gen[lap]
+            stint_start = lap
+    
+    # Verificar último stint (hasta el final)
+    if stint_start < len(gen):
+        stint_length = len(gen) - stint_start
+        max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
+        if stint_length > max_laps * 0.9:
+            penalty_factor = (stint_length / max_laps) ** 2
+            degradation_penalty += penalty_factor * 10.0
+    
+    for lap in range(CANT_VUELTAS):
+        # Calcular carga de combustible (decrece linealmente)
+        fuel_load = 1.0 - (lap / CANT_VUELTAS)
+        
+        # Obtener datos de la vuelta
+        compound = individual[0][lap]
+        tyre_life = individual.TyreAge[lap]
+        is_pit = individual.PitStop[lap]
+        
+        # Predecir tiempo de vuelta
+        try:
+            lap_time = predict_lap_time(
+                lap, compound, tyre_life, fuel_load,
+                reference_conditions, model, features
+            )
+            total_time += lap_time
+        except:
+            # Si hay error en predicción, usar penalización
+            total_time += 90.0  # Tiempo por defecto
+        
+        # Añadir tiempo de pit stop si corresponde
+        if is_pit == 1:
+            total_time += PIT_STOP_TIME
+    
+    # Aplicar penalización por degradación
+    total_time += degradation_penalty
+    
+    return (total_time,)
+
+toolbox.register("evaluate", func_aptitud)
+
+# ============================================================
+# OPERADORES GENÉTICOS
+# ============================================================
+
+def seleccion(population, k):
+    """Selección + mutaciones"""
+    sorted_pop = sorted(population, key=lambda ind: ind.fitness.values[0])
+    mejoresK = sorted_pop[:k]
+
+    mut1 = []
+    mut2 = []
+    mut3 = []
+    mut123 = []
+
+    for ind in mejoresK:
+        if random.random() < PMUT:
+            ind_aux = toolbox.clone(ind)
+            toolbox.compound_mutation(ind_aux)
+            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            mut1.append(ind_aux)
+
+        if random.random() < PMUT and ind.NumPitStop > 1:
+            ind_aux = toolbox.clone(ind)
+            toolbox.remove_pit_mutation(ind_aux)
+            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            mut2.append(ind_aux)
+
+        if random.random() < PMUT:
+            ind_aux = toolbox.clone(ind)
+            toolbox.add_pit_mutation(ind_aux)
+            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            mut3.append(ind_aux)
+        
+        if random.random() < PMUT:
+            ind_aux = toolbox.clone(ind)
+            toolbox.add_pit_mutation(ind_aux)
+            toolbox.remove_pit_mutation(ind_aux)
+            toolbox.compound_mutation(ind_aux)
+            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            mut123.append(ind_aux)
+
+    new_pop = mejoresK + mut1 + mut2 + mut3 + mut123
+
+    num_random = POP_SIZE - len(new_pop)
+    for _ in range(num_random):
+        new_pop.append(toolbox.individual())
+        new_pop[-1].fitness.values = toolbox.evaluate(new_pop[-1])
+
+    return new_pop
+
+def compound_mutation(individual):
+    """Cambia el compuesto de un stint completo, verificando límites"""
+    gen = individual[0]
+    n = len(gen)
+    if n == 0:
+        return
+    
+    idx = random.randint(0, n - 1)
+    comp0 = gen[idx]
+
+    # Buscar inicio y fin del stint
+    start = idx
+    while start > 0 and gen[start - 1] == comp0:
+        start -= 1
+    end = idx
+    while end < n - 1 and gen[end + 1] == comp0:
+        end += 1
+    
+    stint_length = end - start + 1
+
+    # Elegir nuevo compuesto que pueda soportar la longitud del stint
+    opciones = ["SOFT", "MEDIUM", "HARD"]
+    opciones.remove(comp0)
+    
+    # Filtrar compuestos que no pueden soportar el stint
+    valid_options = [c for c in opciones if MAX_LAPS_BY_COMPOUND.get(c, 30) >= stint_length]
+    
+    if not valid_options:
+        # Si ningún compuesto puede soportar el stint, no hacer el cambio
+        return
+    
+    new_comp = random.choice(valid_options)
+    
+    # Aplicar cambio
+    for j in range(start, end + 1):
+        gen[j] = new_comp
+
+    # Recomputar atributos
+    pits = individual.PitStop
+    tyre_age = []
+    last_age = 0
+    for i in range(n):
+        if pits[i] == 1:
+            last_age = 0
+            tyre_age.append(0)
+        else:
+            last_age += 1 if i > 0 else 0
+            tyre_age.append(last_age)
+    individual.TyreAge = tyre_age
+    individual.NumPitStop = sum(pits)
+    individual.Valid = validar_estrategia(individual)
+
+def remove_pit_mutation(individual):
+    """Elimina un pit stop aleatorio, verificando límites de degradación"""
+    pits = individual.PitStop
+    gen = individual[0]
+    pit_indices = [i for i, p in enumerate(pits) if p == 1]
+    
+    if not pit_indices or len(pit_indices) <= 1:
+        return
+    
+    rem_idx = random.choice(pit_indices)
+    
+    # Calcular longitud del stint extendido antes de hacer el cambio
+    comp_prev = gen[rem_idx-1]
+    stint_start = rem_idx - 1
+    while stint_start > 0 and gen[stint_start - 1] == comp_prev:
+        stint_start -= 1
+    
+    end = len(gen)
+    for j in range(rem_idx+1, len(pits)):
+        if pits[j] == 1:
+            end = j
+            break
+    
+    # Calcular longitud total del stint extendido
+    extended_stint_length = end - stint_start
+    max_laps = MAX_LAPS_BY_COMPOUND.get(comp_prev, 30)
+    
+    # Si excedería el límite, no hacer el cambio
+    if extended_stint_length > max_laps:
+        return
+    
+    pits[rem_idx] = 0
+
+    # Extender compuesto previo
+    for j in range(rem_idx, end):
+        gen[j] = comp_prev
+    
+    # Recomputar
+    tyre_age = []
+    last_age = 0
+    for i in range(len(gen)):
+        if pits[i] == 1:
+            last_age = 0
+            tyre_age.append(0)
+        else:
+            last_age += 1 if i > 0 else 0
+            tyre_age.append(last_age)
+    individual.TyreAge = tyre_age
+    individual.NumPitStop = sum(pits)
+    individual.Valid = validar_estrategia(individual)
+
+def add_pit_mutation(individual):
+    """Añade un pit stop en una vuelta aleatoria"""
+    gen = individual[0]
+    pits = individual.PitStop
+    n = len(gen)
+    
+    if n <= 1:
+        return
+    
+    j = random.randint(1, n-1)
+    if pits[j] == 1:
+        return
+    
+    pits[j] = 1
+    new_comp = random.choice(["SOFT", "MEDIUM", "HARD"])
+    gen[j] = new_comp
+
+    # Buscar fin del stint
+    end = n
+    for k in range(j+1, n):
+        if pits[k] == 1:
+            end = k
+            break
+    
+    for k in range(j+1, end):
+        gen[k] = new_comp
+
+    # Recomputar
+    tyre_age = []
+    last_age = 0
+    for i in range(len(gen)):
+        if pits[i] == 1:
+            last_age = 0
+            tyre_age.append(0)
+        else:
+            last_age += 1 if i > 0 else 0
+            tyre_age.append(last_age)
+    individual.TyreAge = tyre_age
+    individual.NumPitStop = sum(pits)
+    individual.Valid = validar_estrategia(individual)
+
+# Registrar operadores
+toolbox.register("select", seleccion)
+toolbox.register("compound_mutation", compound_mutation)
+toolbox.register("remove_pit_mutation", remove_pit_mutation)
+toolbox.register("add_pit_mutation", add_pit_mutation)
+
+# ============================================================
+# EJECUCIÓN PRINCIPAL
+# ============================================================
+
+if __name__ == '__main__':
+    print("="*60)
+    print("INICIANDO OPTIMIZACIÓN DE ESTRATEGIA")
+    print("="*60)
+    print(f"Población: {POP_SIZE} | Generaciones: {NGEN}")
+    print("="*60 + "\n")
+    
+    # Crear población inicial
+    print("[1/3] Creando población inicial...")
+    pop = toolbox.population(n=POP_SIZE)
+
+    # Evaluar población inicial
+    print("[2/3] Evaluando población inicial...")
+    for ind in pop:
+        ind.fitness.values = toolbox.evaluate(ind)
+
+    # Estadísticas
+    stats = tools.Statistics(lambda ind: ind.fitness.values[0])
+    stats.register("avg", np.mean)
+    stats.register("min", np.min)
+    stats.register("max", np.max)
+
+    k = POP_SIZE // 5
+
+    print("[3/3] Evolución en progreso...\n")
+    
+    # Función auxiliar para formatear estrategia de manera concisa
+    def format_strategy_short(ind):
+        """Formatea la estrategia en una línea corta"""
+        compound_counts = {}
+        for compound in ind[0]:
+            compound_counts[compound] = compound_counts.get(compound, 0) + 1
+        
+        # Ordenar compuestos por cantidad (mayor primero)
+        sorted_compounds = sorted(compound_counts.items(), key=lambda x: x[1], reverse=True)
+        # Formato: "1pits: SOFT(71) HARD(7)"
+        strategy_str = f"{ind.NumPitStop}pits: " + " ".join([f"{compound}({count})" for compound, count in sorted_compounds])
+        return strategy_str
+    
+    # Evolución
+    for gen in range(1, NGEN + 1):
+        try:
+            offspring = toolbox.select(pop, k)
+            pop[:] = offspring
+
+            record = stats.compile(pop)
+            
+            # Obtener mejor individuo de esta generación
+            best_ind = tools.selBest(pop, 1)[0]
+            
+            # Convertir tiempo a minutos:segundos
+            min_time = record['min']
+            min_minutes = int(min_time // 60)
+            min_seconds = min_time % 60
+            
+            avg_time = record['avg']
+            avg_minutes = int(avg_time // 60)
+            avg_seconds = avg_time % 60
+            
+            # Mostrar cada generación
+            strategy_str = format_strategy_short(best_ind)
+            print(f"Gen {gen:3d}/{NGEN}: min={min_minutes}:{min_seconds:05.2f} avg={avg_minutes}:{avg_seconds:05.2f} | {strategy_str}")
+        except Exception as e:
+            print(f"\n[!] Error en generación {gen}: {str(e)}")
+            print(f"[!] Continuando con la población actual...")
+            # No romper el loop, continuar con la siguiente generación
+            continue
+    
+    print(f"\n[OK] Completadas {NGEN} generaciones\n")
+
+    # Mejor estrategia
+    print("\n" + "="*60)
+    print("MEJOR ESTRATEGIA ENCONTRADA")
+    print("="*60 + "\n")
+    
+    best = tools.selBest(pop, 1)[0]
+    
+    total_time = best.fitness.values[0]
+    total_minutes = int(total_time // 60)
+    total_seconds = total_time % 60
+    
+    print(f"Tiempo total estimado: {total_minutes}:{total_seconds:05.2f}")
+    print(f"Número de pit stops: {best.NumPitStop}")
+    print(f"Válida: {best.Valid}\n")
+    
+    # Analizar stints
+    print("ESTRATEGIA POR STINTS:")
+    print("-" * 60)
+    
+    current_compound = best[0][0]
+    stint_start = 0
+    stint_number = 1
+    
+    for lap in range(1, CANT_VUELTAS + 1):
+        if lap == CANT_VUELTAS or best[0][lap] != current_compound:
+            stint_length = lap - stint_start
+            print(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {current_compound}")
+            
+            if lap < CANT_VUELTAS:
+                current_compound = best[0][lap]
+                stint_start = lap
+                stint_number += 1
+    
+    print("-" * 60)
+    
+    # Resumen de compuestos
+    print("\nRESUMEN DE COMPUESTOS:")
+    compound_counts = {}
+    for compound in best[0]:
+        compound_counts[compound] = compound_counts.get(compound, 0) + 1
+    
+    for compound, count in sorted(compound_counts.items()):
+        print(f"  {compound}: {count} vueltas ({count/CANT_VUELTAS*100:.1f}%)")
+    
+    print("\n" + "="*60)
+    print("OPTIMIZACIÓN COMPLETADA")
+    print("="*60 + "\n")
+    
+    # Guardar estrategia
+    output_file = f"best_strategy_{YEAR}_{GP}_{DRIVER}.txt"
+    with open(output_file, 'w') as f:
+        f.write(f"MEJOR ESTRATEGIA - {YEAR} {GP} ({metadata['circuit']})\n")
+        f.write("="*60 + "\n\n")
+        f.write(f"Piloto de referencia: {DRIVER}\n")
+        f.write(f"Tiempo total estimado: {total_minutes}:{total_seconds:05.2f}\n")
+        f.write(f"Número de pit stops: {best.NumPitStop}\n\n")
+        f.write("ESTRATEGIA POR STINTS:\n")
+        f.write("-" * 60 + "\n")
+        
+        current_compound = best[0][0]
+        stint_start = 0
+        stint_number = 1
+        
+        for lap in range(1, CANT_VUELTAS + 1):
+            if lap == CANT_VUELTAS or best[0][lap] != current_compound:
+                stint_length = lap - stint_start
+                f.write(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {current_compound}\n")
+                
+                if lap < CANT_VUELTAS:
+                    current_compound = best[0][lap]
+                    stint_start = lap
+                    stint_number += 1
+    
+    print(f"[OK] Estrategia guardada en: {output_file}\n")
+

@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Modelos entrenados (pueden ser grandes)
+*.pkl
+*.pth
+*.h5
+*.ckpt
+
+# Cache de FastF1
+utils/XGBoost/cache/
+utils/ES/cache/
+
+# Archivos de resultados generados
+best_strategy_*.txt
+
+# Entornos virtuales
+venv/
+env/
+ENV/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
