@@ -104,12 +104,14 @@ print("[4/4] Feature engineering...")
 train_data = create_features(train_data)
 test_data = create_features(test_data)
 
-# SOLO FEATURES BÁSICAS
+# FEATURES MEJORADAS PARA CAPTURAR DEGRADACIÓN
 features = [
     # Categóricas
     "Compound", "SessionType", "Team",
-    # Neumáticos
+    # Neumáticos básicas
     "TyreLife", "TyreWearRate", "TyreLifeSquared", "CompoundHardness",
+    # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
+    "TyreLifeByCompound", "RelativeTyreAge",
     # Combustible
     "FuelLoad", "FuelPenalty",
     # Temperatura

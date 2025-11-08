@@ -11,23 +11,16 @@ DRIVER = "VER"  # Para obtener datos de referencia
 CANT_VUELTAS = 53  # Número de vueltas en la carrera (ajustar según circuito)
 
 # Parámetros del algoritmo evolutivo
-POP_SIZE = 20
-NGEN = 20
+POP_SIZE = 100
+NGEN = 100
 PMUT = 0.9
 
 # Tiempo de pit stop 
 PIT_STOP_TIME = 25.0 
 
-# Límites máximos de vueltas por compuesto (degradación realista)
-MAX_LAPS_SOFT = 30   # Soft no puede durar más de 30 vueltas
-MAX_LAPS_MEDIUM = 40  # Medium no puede durar más de 40 vueltas
-MAX_LAPS_HARD = 55    # Hard no puede durar más de 55 vueltas
-
-MAX_LAPS_BY_COMPOUND = {
-    "SOFT": MAX_LAPS_SOFT,
-    "MEDIUM": MAX_LAPS_MEDIUM,
-    "HARD": MAX_LAPS_HARD
-}
+# NOTA: Se eliminaron los límites explícitos de vueltas por compuesto.
+# El modelo de predicción aprenderá implícitamente que mantener un neumático
+# por mucho tiempo resulta en tiempos de vuelta peores debido a la degradación.
 
 # Cargar modelo
 # El modelo se guarda en utils/XGBoost/models/, así que buscamos ahí
@@ -191,6 +184,7 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
     """
     # Mapeo de compuestos
     compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
+    compound_hardness = compound_map.get(compound, 2)
     
     features_dict = {
         # Categóricas
@@ -198,11 +192,15 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "SessionType": "R",  # Predecimos para carrera
         "Team": conditions["Team"],
         
-        # Neumáticos
+        # Neumáticos básicas
         "TyreLife": tyre_life,
-        "TyreWearRate": tyre_life / (lap_number + 1),
+        "TyreWearRate": tyre_life / 50.0,  # Normalizar igual que en entrenamiento
         "TyreLifeSquared": tyre_life ** 2,
-        "CompoundHardness": compound_map.get(compound, 2),
+        "CompoundHardness": compound_hardness,
+        
+        # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
+        "TyreLifeByCompound": tyre_life * compound_hardness,
+        "RelativeTyreAge": tyre_life / compound_hardness,
         
         # Combustible
         "FuelLoad": fuel_load,

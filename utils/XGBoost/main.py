@@ -198,18 +198,27 @@ def create_features(df):
     Features MÍNIMAS y ROBUSTAS
     Solo las que realmente importan
     """
-    # Básicas de neumáticos
-    df["TyreWearRate"] = df["TyreLife"] / (df["LapNumber"] + 1)
-    
-    # Combustible
-    df["FuelPenalty"] = df["FuelLoad"] * 3.0
-    
-    # Degradación cuadrática (solo la más importante)
-    df["TyreLifeSquared"] = df["TyreLife"] ** 2
-    
     # Compuesto numérico
     compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
     df["CompoundHardness"] = df["Compound"].map(compound_map)
+    
+    # Básicas de neumáticos
+    # TyreWearRate: normalizar por edad máxima razonable (más representativo)
+    df["TyreWearRate"] = df["TyreLife"] / 50.0  # Normalizar a ~50 vueltas máximo
+    
+    # Degradación cuadrática
+    df["TyreLifeSquared"] = df["TyreLife"] ** 2
+    
+    # Interacción compuesto-edad (el modelo aprenderá que SOFT con alta edad = peor)
+    # Esta es una feature natural que el modelo puede aprender, no una penalización explícita
+    df["TyreLifeByCompound"] = df["TyreLife"] * df["CompoundHardness"]
+    
+    # Degradación relativa: edad del neumático relativa a su dureza
+    # Los neumáticos blandos (1) con alta edad se degradan más rápido
+    df["RelativeTyreAge"] = df["TyreLife"] / df["CompoundHardness"]
+    
+    # Combustible
+    df["FuelPenalty"] = df["FuelLoad"] * 3.0
     
     # Temperatura
     df["TempDiff"] = df["TrackTemp"] - df["AirTemp"]

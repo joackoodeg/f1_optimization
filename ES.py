@@ -13,7 +13,6 @@ from utils.ES.main import (
     YEAR, GP, DRIVER, CANT_VUELTAS,
     POP_SIZE, NGEN, PMUT,
     PIT_STOP_TIME,
-    MAX_LAPS_BY_COMPOUND,
     reference_conditions,
     model, features, metadata,
     predict_lap_time
@@ -26,7 +25,9 @@ toolbox = base.Toolbox()
 
 def create_individual():
     """
-    Crea un individuo (estrategia) aleatorio respetando límites de degradación
+    Crea un individuo (estrategia) aleatorio.
+    El modelo aprenderá implícitamente que mantener un neumático por mucho tiempo
+    resulta en tiempos de vuelta peores.
     genTyreCompound: lista de compuestos por vuelta (SOFT, MEDIUM, HARD)
     """
     genTyreCompound = []
@@ -43,11 +44,15 @@ def create_individual():
     
     # Contador de vueltas en el stint actual
     stint_laps = 1
-    max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
 
     for lap in range(1, CANT_VUELTAS):
-        # Si el stint actual se acerca al límite, forzar pit stop
-        if stint_laps >= max_laps_current * 0.95:  # A los 95% del límite, cambiar
+        # Probabilidad de hacer pit stop (aumenta con la edad del neumático)
+        # El modelo aprenderá que neumáticos más viejos son peores
+        prob_pit = 0.05 + (stint_laps / CANT_VUELTAS) * 0.15  # 5% base, hasta 20%
+        newTyre = np.random.choice([True, False], p=[prob_pit, 1 - prob_pit])
+        
+        if newTyre:
+            # Elegir nuevo compuesto (evitar el mismo)
             new_compound = random.choice([c for c in compound_names if c != compound])
             compound = new_compound
             genTyreCompound.append(compound)
@@ -55,27 +60,11 @@ def create_individual():
             PitStop.append(1)
             NumPitStop += 1
             stint_laps = 1
-            max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
         else:
-            # Probabilidad de hacer pit stop (mayor si el stint es largo)
-            prob_pit = 0.05 + (stint_laps / max_laps_current) * 0.15  # 5% base, hasta 20%
-            newTyre = np.random.choice([True, False], p=[prob_pit, 1 - prob_pit])
-            
-            if newTyre:
-                # Elegir nuevo compuesto (evitar el mismo)
-                new_compound = random.choice([c for c in compound_names if c != compound])
-                compound = new_compound
-                genTyreCompound.append(compound)
-                TyreAge.append(0)
-                PitStop.append(1)
-                NumPitStop += 1
-                stint_laps = 1
-                max_laps_current = MAX_LAPS_BY_COMPOUND.get(compound, 30)
-            else:
-                genTyreCompound.append(compound)
-                TyreAge.append(TyreAge[-1] + 1)
-                PitStop.append(0)
-                stint_laps += 1
+            genTyreCompound.append(compound)
+            TyreAge.append(TyreAge[-1] + 1)
+            PitStop.append(0)
+            stint_laps += 1
 
     ind = creator.Individual([genTyreCompound])
     ind.PitStop = PitStop
@@ -89,49 +78,29 @@ toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
 def validar_estrategia(individual):
     """
-    Valida que la estrategia cumpla con las reglas de F1:
+    Valida que la estrategia cumpla con las reglas básicas de F1:
     - Al menos un pit stop
     - Al menos dos tipos de neumáticos diferentes
-    - Ningún stint excede el límite máximo de vueltas por compuesto
+    
+    Nota: No se validan límites explícitos de degradación.
+    El modelo aprenderá implícitamente que mantener un neumático
+    por mucho tiempo resulta en tiempos de vuelta peores.
     """
     gen = individual[0]
     tipos_usados = set(gen)
     
-    # Validación básica
+    # Validación básica: al menos un pit stop y dos tipos de neumáticos
     if individual.NumPitStop == 0 or len(tipos_usados) < 2:
         return False
-    
-    # Validar límites de degradación por stint
-    current_compound = gen[0]
-    stint_start = 0
-    
-    for lap in range(1, len(gen)):
-        if gen[lap] != current_compound:
-            # Fin de stint (cambio de compuesto)
-            stint_length = lap - stint_start
-            max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
-            
-            # Si excede el límite, la estrategia es inválida
-            if stint_length > max_laps:
-                return False
-            
-            current_compound = gen[lap]
-            stint_start = lap
-    
-    # Verificar último stint (hasta el final)
-    if stint_start < len(gen):
-        stint_length = len(gen) - stint_start
-        max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
-        if stint_length > max_laps:
-            return False
     
     return True
 
 def func_aptitud(individual):
     """
     Función de aptitud: minimizar tiempo total de carrera
-    Usa el modelo predictivo para estimar tiempos de vuelta
-    Penaliza estrategias que excedan límites de degradación
+    Usa el modelo predictivo para estimar tiempos de vuelta.
+    El modelo ya incluye la degradación de neumáticos en sus predicciones,
+    por lo que no se necesitan penalizaciones explícitas.
     """
     # Validar primero
     individual.Valid = validar_estrategia(individual)
@@ -140,34 +109,6 @@ def func_aptitud(individual):
         return (1e6,)  # Penalización enorme si no es válida
     
     total_time = 0.0
-    
-    # Penalización adicional por acercarse a límites de degradación
-    gen = individual[0]
-    current_compound = gen[0]
-    stint_start = 0
-    degradation_penalty = 0.0
-    
-    for lap in range(1, len(gen)):
-        if gen[lap] != current_compound:
-            # Fin de stint (cambio de compuesto)
-            stint_length = lap - stint_start
-            max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
-            
-            # Penalización progresiva si se acerca al límite
-            if stint_length > max_laps * 0.9:  # Último 10% del límite
-                penalty_factor = (stint_length / max_laps) ** 2
-                degradation_penalty += penalty_factor * 10.0  # Penalización de tiempo
-            
-            current_compound = gen[lap]
-            stint_start = lap
-    
-    # Verificar último stint (hasta el final)
-    if stint_start < len(gen):
-        stint_length = len(gen) - stint_start
-        max_laps = MAX_LAPS_BY_COMPOUND.get(current_compound, 30)
-        if stint_length > max_laps * 0.9:
-            penalty_factor = (stint_length / max_laps) ** 2
-            degradation_penalty += penalty_factor * 10.0
     
     for lap in range(CANT_VUELTAS):
         # Calcular carga de combustible (decrece linealmente)
@@ -179,6 +120,8 @@ def func_aptitud(individual):
         is_pit = individual.PitStop[lap]
         
         # Predecir tiempo de vuelta
+        # El modelo ya incluye la degradación de neumáticos (TyreLife, TyreWearRate)
+        # por lo que aprenderá implícitamente que neumáticos más viejos son peores
         try:
             lap_time = predict_lap_time(
                 lap, compound, tyre_life, fuel_load,
@@ -193,15 +136,12 @@ def func_aptitud(individual):
         if is_pit == 1:
             total_time += PIT_STOP_TIME
     
-    # Aplicar penalización por degradación
-    total_time += degradation_penalty
-    
     return (total_time,)
 
 toolbox.register("evaluate", func_aptitud)
 
 # ============================================================
-# OPERADORES GENÉTICOS
+# OPERADORES EVOLUTIVOS
 # ============================================================
 
 def seleccion(population, k):
@@ -251,7 +191,9 @@ def seleccion(population, k):
     return new_pop
 
 def compound_mutation(individual):
-    """Cambia el compuesto de un stint completo, verificando límites"""
+    """Cambia el compuesto de un stint completo.
+    El modelo aprenderá implícitamente qué compuestos funcionan mejor
+    para diferentes longitudes de stint."""
     gen = individual[0]
     n = len(gen)
     if n == 0:
@@ -267,21 +209,11 @@ def compound_mutation(individual):
     end = idx
     while end < n - 1 and gen[end + 1] == comp0:
         end += 1
-    
-    stint_length = end - start + 1
 
-    # Elegir nuevo compuesto que pueda soportar la longitud del stint
+    # Elegir nuevo compuesto (cualquiera excepto el actual)
     opciones = ["SOFT", "MEDIUM", "HARD"]
     opciones.remove(comp0)
-    
-    # Filtrar compuestos que no pueden soportar el stint
-    valid_options = [c for c in opciones if MAX_LAPS_BY_COMPOUND.get(c, 30) >= stint_length]
-    
-    if not valid_options:
-        # Si ningún compuesto puede soportar el stint, no hacer el cambio
-        return
-    
-    new_comp = random.choice(valid_options)
+    new_comp = random.choice(opciones)
     
     # Aplicar cambio
     for j in range(start, end + 1):
@@ -303,7 +235,9 @@ def compound_mutation(individual):
     individual.Valid = validar_estrategia(individual)
 
 def remove_pit_mutation(individual):
-    """Elimina un pit stop aleatorio, verificando límites de degradación"""
+    """Elimina un pit stop aleatorio.
+    El modelo aprenderá implícitamente si el stint extendido resulta
+    en tiempos de vuelta peores debido a la degradación."""
     pits = individual.PitStop
     gen = individual[0]
     pit_indices = [i for i, p in enumerate(pits) if p == 1]
@@ -324,14 +258,6 @@ def remove_pit_mutation(individual):
         if pits[j] == 1:
             end = j
             break
-    
-    # Calcular longitud total del stint extendido
-    extended_stint_length = end - stint_start
-    max_laps = MAX_LAPS_BY_COMPOUND.get(comp_prev, 30)
-    
-    # Si excedería el límite, no hacer el cambio
-    if extended_stint_length > max_laps:
-        return
     
     pits[rem_idx] = 0
 
