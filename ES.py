@@ -6,6 +6,7 @@ from deap import base, creator, tools
 import fastf1
 import joblib
 import warnings
+from scoop import futures ################### pip install scoop
 warnings.filterwarnings("ignore")
 
 # Importar funciones y variables desde utils/ES/main.py
@@ -158,19 +159,19 @@ def seleccion(population, k):
         if random.random() < PMUT:
             ind_aux = toolbox.clone(ind)
             toolbox.compound_mutation(ind_aux)
-            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            del ind_aux.fitness.values
             mut1.append(ind_aux)
 
         if random.random() < PMUT and ind.NumPitStop > 1:
             ind_aux = toolbox.clone(ind)
             toolbox.remove_pit_mutation(ind_aux)
-            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            del ind_aux.fitness.values
             mut2.append(ind_aux)
 
         if random.random() < PMUT:
             ind_aux = toolbox.clone(ind)
             toolbox.add_pit_mutation(ind_aux)
-            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            del ind_aux.fitness.values
             mut3.append(ind_aux)
         
         if random.random() < PMUT:
@@ -178,17 +179,25 @@ def seleccion(population, k):
             toolbox.add_pit_mutation(ind_aux)
             toolbox.remove_pit_mutation(ind_aux)
             toolbox.compound_mutation(ind_aux)
-            ind_aux.fitness.values = toolbox.evaluate(ind_aux)
+            del ind_aux.fitness.values
             mut123.append(ind_aux)
 
     new_pop = mejoresK + mut1 + mut2 + mut3 + mut123
 
+    #for _ in range(1,len(mejoresK)//2):
+    #    toolbox.mate(random.choice(mejoresK), random.choice(mejoresK)) #######################
+
     num_random = POP_SIZE - len(new_pop)
     for _ in range(num_random):
         new_pop.append(toolbox.individual())
-        new_pop[-1].fitness.values = toolbox.evaluate(new_pop[-1])
 
     return new_pop
+
+def cruza(ind1, ind2):
+    
+    pass
+
+toolbox.register("mate", cruza)
 
 def compound_mutation(individual):
     """Cambia el compuesto de un stint completo.
@@ -337,14 +346,21 @@ if __name__ == '__main__':
     print(f"Población: {POP_SIZE} | Generaciones: {NGEN}")
     print("="*60 + "\n")
     
+    #Registrar el map de scoop para paralelización
+    toolbox.register("map", futures.map)
+
     # Crear población inicial
     print("[1/3] Creando población inicial...")
     pop = toolbox.population(n=POP_SIZE)
 
     # Evaluar población inicial
     print("[2/3] Evaluando población inicial...")
-    for ind in pop:
-        ind.fitness.values = toolbox.evaluate(ind)
+    #for ind in pop:
+    #    ind.fitness.values = toolbox.evaluate(ind)
+    
+    fitness_ini = map(toolbox.evaluate, pop) #Evaluar en paralelo
+    for ind, fit in zip(pop, fitness_ini):
+        ind.fitness.values = fit
 
     # Estadísticas
     stats = tools.Statistics(lambda ind: ind.fitness.values[0])
@@ -352,7 +368,7 @@ if __name__ == '__main__':
     stats.register("min", np.min)
     stats.register("max", np.max)
 
-    k = POP_SIZE // 5
+    k = POP_SIZE // 6 #Número de mejores individuos a seleccionar
 
     print("[3/3] Evolución en progreso...\n")
     
@@ -374,6 +390,12 @@ if __name__ == '__main__':
         try:
             offspring = toolbox.select(pop, k)
             pop[:] = offspring
+
+            #Evaluar individuos nuevos
+            invalid_ind = [ind for ind in pop if not ind.fitness.valid]
+            fitness_valid = map(toolbox.evaluate, invalid_ind)
+            for ind, fit in zip(invalid_ind, fitness_valid):
+                ind.fitness.values = fit
 
             record = stats.compile(pop)
             
