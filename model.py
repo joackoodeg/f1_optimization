@@ -34,9 +34,13 @@ if target_circuit is None:
 print(f"[OK] {target_circuit}\n")
 
 training_data_list = []
-sessions = ["R", "Q", "FP3", "FP2"]
+# SOLO CARGAR CARRERAS (SessionType == "R")
+# Es crítico usar solo carreras porque las prácticas/qualifying tienen patrones diferentes
+# (en qualifying los neumáticos SOFT pueden durar más porque no hay tanto desgaste)
+# Aunque los datos de carrera tienen más ruido, son los únicos que reflejan la realidad de una carrera
+sessions = ["R"]
 
-print("[1/4] Cargando datos históricos...")
+print("[1/4] Cargando datos históricos (SOLO CARRERAS)...")
 for hist_year in historical_years:
     try:
         schedule = fastf1.get_event_schedule(hist_year)
@@ -63,83 +67,164 @@ for hist_year in historical_years:
         print(f"  {hist_year}: Error")
 
 if not training_data_list:
-    raise SystemExit("[X] No hay datos históricos")
+    raise SystemExit("[X] No hay datos históricos de carreras")
 
 all_train_data = pd.concat(training_data_list, ignore_index=True)
-print(f"\n  Total histórico: {len(all_train_data)} laps\n")
+print(f"\n  Total histórico (carreras): {len(all_train_data)} laps\n")
 
-# Datos año actual
-print("[2/4] Cargando datos año actual...")
-current_sessions = ["FP1", "FP2", "FP3", "Q"]
-current_data_list = []
-
-for sess in current_sessions:
-    try:
-        print(f"  {sess}: ", end="")
-        data, _ = load_session_data(year, gp, sess, circuit_name=target_circuit)
-        if data is not None and len(data) > 0:
-            current_data_list.append(data)
-            print(f"OK {len(data)} laps")
-        else:
-            print("SKIP")
-    except:
-        print("SKIP")
-
-if current_data_list:
-    current_data = pd.concat(current_data_list, ignore_index=True)
-    all_train_data = pd.concat([all_train_data, current_data], ignore_index=True)
-    print(f"\n  Total con {year}: {len(all_train_data)} laps\n")
+# NO cargar datos del año actual (2025) - solo usar datos históricos
+print("[2/4] Verificando que solo hay datos de carrera...")
+print(f"  Total de datos: {len(all_train_data)}")
+if 'SessionType' in all_train_data.columns:
+    session_counts = all_train_data['SessionType'].value_counts()
+    print(f"  Distribución por sesión:")
+    for session, count in session_counts.items():
+        print(f"    {session}: {count}")
+    
+    # Filtrar SOLO carreras - sin excepciones
+    race_data = all_train_data[all_train_data['SessionType'] == 'R'].copy()
+    print(f"\n  Datos de carrera (SessionType='R'): {len(race_data)}")
+    
+    if len(race_data) == 0:
+        raise SystemExit("[X] ERROR: No hay datos de carrera. El modelo solo puede entrenarse con carreras.")
+    
+    if len(race_data) < 100:
+        print(f"  [!] Advertencia: Pocos datos de carrera ({len(race_data)}). Continuando de todos modos.")
+    
+    # Verificar que no hay datos de otras sesiones
+    non_race_data = all_train_data[all_train_data['SessionType'] != 'R']
+    if len(non_race_data) > 0:
+        print(f"  [!] ADVERTENCIA: Se encontraron {len(non_race_data)} datos de sesiones no-carrera. Serán eliminados.")
+        print(f"      Sesiones encontradas: {non_race_data['SessionType'].unique()}")
 else:
-    print(f"\n  [!] Sin datos de {year}, solo histórico\n")
+    raise SystemExit("[X] ERROR: No hay columna SessionType. No se puede verificar que solo hay carreras.")
 
-# Validación: usar último 20%
-print("[3/4] Preparando validación...")
-split_idx = int(len(all_train_data) * 0.8)
-train_data = all_train_data.iloc[:split_idx].copy()
-test_data = all_train_data.iloc[split_idx:].copy()
-print(f"  Train: {len(train_data)} | Val: {len(test_data)}\n")
+# NO separar validación - usar TODOS los datos para entrenar
+print("\n[3/4] Preparando datos para entrenamiento (SIN validación)...")
+train_data = race_data.copy()
+print(f"  Train: {len(train_data)} laps (100% de los datos)\n")
 
 # Features
 print("[4/4] Feature engineering...")
 train_data = create_features(train_data)
-test_data = create_features(test_data)
+
+# Verificación final: asegurar que solo tenemos datos de carrera
+if 'SessionType' in train_data.columns:
+    non_race_train = train_data[train_data['SessionType'] != 'R']
+    if len(non_race_train) > 0:
+        print(f"  [!] ADVERTENCIA CRÍTICA: Se encontraron datos no-carrera después del feature engineering.")
+        print(f"      Train: {len(non_race_train)} datos no-carrera")
+        print(f"      Eliminando datos no-carrera...")
+        train_data = train_data[train_data['SessionType'] == 'R'].copy()
+        print(f"      Train después de filtro: {len(train_data)}")
+    else:
+        print(f"  [OK] Verificado: Solo datos de carrera (Train: {len(train_data)})")
+print()
 
 # FEATURES MEJORADAS PARA CAPTURAR DEGRADACIÓN
+# IMPORTANTE: Eliminar features constantes (AvgSpeed, AvgThrottle, MaxSpeed) porque
+# tienen correlación muy alta durante el entrenamiento pero son constantes durante la predicción
+# Esto hace que el modelo devuelva siempre el mismo valor
+# También eliminar features redundantes:
+# - TyreWearRate: correlación perfecta (1.0) con TyreLife
+# - RelativeTyreAge: correlacionada con TyreLife y CompoundHardness
+# - CompoundHardness: redundante con Compound (categórica), pero se usa para calcular TyreLifeByCompound
 features = [
     # Categóricas
-    "Compound", "SessionType", "Team",
+    "Compound",
+    # SessionType ELIMINADA: Solo usamos datos de carrera (SessionType="R"), por lo que es constante
+    # Team ELIMINADA: No es relevante para predecir degradación de neumáticos
     # Neumáticos básicas
-    "TyreLife", "TyreWearRate", "TyreLifeSquared", "CompoundHardness",
+    "TyreLife", "TyreLifeSquared", "TyreLifeCubed",
     # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
-    "TyreLifeByCompound", "RelativeTyreAge",
+    "TyreLifeByCompound",
     # Combustible
     "FuelLoad", "FuelPenalty",
-    # Temperatura
-    "TrackTemp", "AirTemp", "Humidity", "TempDiff",
-    # Telemetría
-    "MaxSpeed", "AvgSpeed", "AvgThrottle"
+    # Temperatura (mantener porque varían entre carreras)
+    "TrackTemp", "AirTemp", "Humidity"
+    # Telemetría ELIMINADA: MaxSpeed, AvgSpeed, AvgThrottle
+    # Features redundantes ELIMINADAS: TyreWearRate, RelativeTyreAge, CompoundHardness, SoftDegradation, SessionType, Team
 ]
 
 print(f"  Features: {len(features)}\n")
 
 # Preparar datos
 y_train = np.log1p(train_data["LapTimeSec"])
-y_test = np.log1p(test_data["LapTimeSec"])
 
 X_train = train_data[features]
-X_test = test_data[features]
 
 # Rellenar NaN solo en columnas numéricas
-numerical_features = [f for f in features if f not in ["Compound", "SessionType", "Team"]]
+numerical_features = [f for f in features if f not in ["Compound"]]
 X_train[numerical_features] = X_train[numerical_features].fillna(X_train[numerical_features].median())
-X_test[numerical_features] = X_test[numerical_features].fillna(X_train[numerical_features].median())
+
+# Debug: Verificar variación de features
+print("Variación de features en el conjunto de entrenamiento:")
+varying_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound', 'FuelLoad', 'FuelPenalty']
+constant_features = ['TrackTemp', 'AirTemp', 'Humidity']
+for feat_name in varying_features + constant_features:
+    if feat_name in X_train.columns:
+        std_val = X_train[feat_name].std()
+        mean_val = X_train[feat_name].mean()
+        cv = std_val / mean_val if mean_val != 0 else 0  # Coeficiente de variación
+        min_val = X_train[feat_name].min()
+        max_val = X_train[feat_name].max()
+        print(f"  {feat_name}: std={std_val:.3f}, mean={mean_val:.3f}, CV={cv:.3f}, range=[{min_val:.1f}, {max_val:.1f}]")
+print()
+
+# Debug: Análisis detallado de TyreLife
+print("Análisis de TyreLife en datos de entrenamiento:")
+if 'TyreLife' in train_data.columns:
+    print(f"  Min: {train_data['TyreLife'].min()}")
+    print(f"  Max: {train_data['TyreLife'].max()}")
+    print(f"  Mean: {train_data['TyreLife'].mean():.2f}")
+    print(f"  Median: {train_data['TyreLife'].median():.2f}")
+    print(f"  Percentiles: 25%={train_data['TyreLife'].quantile(0.25):.1f}, 50%={train_data['TyreLife'].quantile(0.50):.1f}, 75%={train_data['TyreLife'].quantile(0.75):.1f}, 95%={train_data['TyreLife'].quantile(0.95):.1f}")
+    
+    # Verificar distribución por compuesto
+    print("\n  Distribución de TyreLife por compuesto:")
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = train_data[train_data['Compound'] == compound]
+        if len(compound_data) > 0:
+            print(f"    {compound}: count={len(compound_data)}, TyreLife range=[{compound_data['TyreLife'].min():.0f}, {compound_data['TyreLife'].max():.0f}], mean={compound_data['TyreLife'].mean():.2f}")
+    
+    # Verificar si hay correlación entre TyreLife y LapTimeSec por compuesto
+    print("\n  Correlación TyreLife vs LapTimeSec por compuesto:")
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = train_data[train_data['Compound'] == compound]
+        if len(compound_data) > 10:  # Solo si hay suficientes datos
+            corr = compound_data['TyreLife'].corr(compound_data['LapTimeSec'])
+            print(f"    {compound}: corr={corr:.4f} (n={len(compound_data)})")
+print()
+
+# Debug: Verificar correlación con el target
+print("Correlación de features con el target (LapTimeSec):")
+train_data_with_target = train_data.copy()
+train_data_with_target['LapTimeSec'] = train_data['LapTimeSec']
+for feat_name in varying_features + constant_features:
+    if feat_name in train_data_with_target.columns:
+        corr = train_data_with_target[feat_name].corr(train_data_with_target['LapTimeSec'])
+        print(f"  {feat_name}: corr={corr:.4f}")
+print()
+
+# Debug: Verificar correlación entre features de neumáticos
+print("Correlación entre features de neumáticos:")
+tyre_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound']
+tyre_corr_matrix = train_data[tyre_features].corr()
+print("Matriz de correlación:")
+for i, feat1 in enumerate(tyre_features):
+    for j, feat2 in enumerate(tyre_features):
+        if i < j:  # Solo mostrar la mitad superior
+            corr_val = tyre_corr_matrix.loc[feat1, feat2]
+            if abs(corr_val) > 0.9:  # Solo mostrar correlaciones muy altas
+                print(f"  {feat1} <-> {feat2}: {corr_val:.4f}")
+print()
 
 print("="*60)
 print("ENTRENANDO MODELO XGBOOST")
 print("="*60 + "\n")
 
 # Preprocessor
-categorical = ["Compound", "SessionType", "Team"]
+categorical = ["Compound"]
 numerical = [f for f in features if f not in categorical]
 
 preprocessor = ColumnTransformer([
@@ -148,20 +233,24 @@ preprocessor = ColumnTransformer([
 ])
 
 # MODELO XGBOOST
+# Modelo robusto para datos de carrera con mucho ruido
+# Necesitamos que aprenda la degradación a pesar del ruido
 model = Pipeline([
     ("pre", preprocessor),
     ("reg", XGBRegressor(
-        n_estimators=300,        # Número de árboles en el modelo (más árboles = mejor ajuste pero más tiempo)
-        learning_rate=0.05,      # Tasa de aprendizaje: controla qué tan rápido aprende el modelo (más bajo = más conservador)
-        max_depth=4,             # Profundidad máxima de cada árbol (más profundo = más complejo, riesgo de overfitting)
-        subsample=0.6,           # Fracción de muestras usadas para entrenar cada árbol (previene overfitting)
-        colsample_bytree=0.6,    # Fracción de features usadas para cada árbol (reduce correlación entre árboles)
-        min_child_weight=5,      # Peso mínimo requerido en nodos hijo (mayor valor = más conservador, previene overfitting)
-        gamma=0.2,               # Penalización mínima de pérdida para hacer splits (mayor valor = árboles más simples)
-        reg_alpha=0.2,           # Regularización L1 (Lasso) - penaliza features poco importantes
-        reg_lambda=2.0,          # Regularización L2 (Ridge) - penaliza pesos grandes para evitar overfitting
+        n_estimators=500,        # Más árboles para capturar patrones a pesar del ruido
+        learning_rate=0.03,      # Tasa de aprendizaje más baja para aprender mejor
+        max_depth=6,             # Profundidad moderada-alta para capturar degradación
+        subsample=0.8,           # Usar 80% de muestras para cada árbol (reducir sobreajuste)
+        colsample_bytree=0.8,    # Usar 80% de features para cada árbol
+        colsample_bylevel=0.8,   # Usar 80% de features en cada nivel
+        min_child_weight=2,      # Peso mínimo bajo para permitir splits en degradación
+        gamma=0.0,               # Sin penalización mínima para permitir splits
+        reg_alpha=0.0,           # Sin regularización L1 para no penalizar features de degradación
+        reg_lambda=0.5,          # Regularización L2 baja para no penalizar tanto las features
         random_state=42,
-        verbosity=0
+        verbosity=0,
+        importance_type='gain'  # Usar 'gain' en lugar de 'weight' para mejor importancia de features
     ))
 ])
 
@@ -169,66 +258,74 @@ print("Entrenando modelo XGBoost...")
 model.fit(X_train, y_train)
 print("OK Completado\n")
 
-# Evaluación
-print("="*60)
-print("EVALUACIÓN")
-print("="*60 + "\n")
+# Verificar importancia de features
+regressor = model.named_steps['reg']
+feature_importance = regressor.feature_importances_
 
-# Cross-validation temporal
-tscv = TimeSeriesSplit(n_splits=3)
-cv_scores = []
+# Obtener nombres de features después del preprocesamiento
+feature_names_after_preprocessing = []
+preprocessor = model.named_steps['pre']
+for name, transformer, columns in preprocessor.transformers_:
+    if name == 'cat':
+        if hasattr(transformer, 'categories_'):
+            for i, col in enumerate(columns):
+                for cat in transformer.categories_[i]:
+                    feature_names_after_preprocessing.append(f"{col}_{cat}")
+    elif name == 'num':
+        feature_names_after_preprocessing.extend(columns)
 
-print("Validación cruzada:")
-for fold, (train_idx, val_idx) in enumerate(tscv.split(X_train), 1):
-    X_fold_train = X_train.iloc[train_idx]
-    y_fold_train = y_train.iloc[train_idx]
-    X_fold_val = X_train.iloc[val_idx]
-    y_fold_val = y_train.iloc[val_idx]
-    
-    model.fit(X_fold_train, y_fold_train)
-    score = model.score(X_fold_val, y_fold_val)
-    cv_scores.append(score)
-    print(f"  Fold {fold}: R² = {score:.3f}")
+# Mostrar top 10 features con mayor importancia
+top_indices = np.argsort(feature_importance)[-10:][::-1]
+print("Top 10 features con mayor importancia:")
+for idx in top_indices:
+    if idx < len(feature_names_after_preprocessing):
+        print(f"  {idx}: {feature_names_after_preprocessing[idx]} = {feature_importance[idx]:.6f}")
+print()
 
-print(f"\n  Media CV: {np.mean(cv_scores):.3f} ± {np.std(cv_scores):.3f}\n")
+# Mostrar todas las features que varían y su importancia
+print("Features que varían (TyreLife, TyreLifeSquared, FuelLoad, etc.):")
+varying_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound', 'FuelLoad', 'FuelPenalty']
+for feat_name in varying_features:
+    if feat_name in feature_names_after_preprocessing:
+        idx = feature_names_after_preprocessing.index(feat_name)
+        print(f"  {idx}: {feat_name} = {feature_importance[idx]:.6f}")
+print()
 
-# Re-entrenar con todos los datos
+# Entrenar con TODOS los datos (sin validación)
+print("Entrenando con todos los datos disponibles...")
 model.fit(X_train, y_train)
 
+# Evaluación solo en datos de entrenamiento
 r2_train = model.score(X_train, y_train)
-r2_val = model.score(X_test, y_test)
-
 y_pred_train = model.predict(X_train)
-y_pred_val = model.predict(X_test)
-
 mae_train = mean_absolute_error(np.expm1(y_train), np.expm1(y_pred_train))
-mae_val = mean_absolute_error(np.expm1(y_test), np.expm1(y_pred_val))
 
 print("="*60)
 print("RESULTADOS FINALES")
 print("="*60)
-print(f"\nTRAIN:")
+print(f"\nENTRENAMIENTO (100% de los datos):")
 print(f"  R²:   {r2_train:.3f}")
 print(f"  MAE:  {mae_train:.3f}s")
-print(f"\nVALIDACIÓN:")
-print(f"  R²:   {r2_val:.3f}")
-print(f"  MAE:  {mae_val:.3f}s")
+print(f"\n[NOTA] No se reservó conjunto de validación - modelo entrenado con todos los datos disponibles")
 
-# Guardar
+# Guardar con el mismo nombre que antes para compatibilidad con ES.py
 metadata = {
     'year': year,
     'gp': gp,
     'circuit': target_circuit,
     'version': 'v2_conservative',
     'train_samples': len(train_data),
-    'val_samples': len(test_data),
+    'val_samples': 0,  # Sin validación
     'r2_train': r2_train,
-    'r2_val': r2_val,
+    'r2_val': None,  # Sin validación
     'mae_train': mae_train,
-    'mae_val': mae_val,
-    'features_count': len(features)
+    'mae_val': None,  # Sin validación
+    'features_count': len(features),
+    'note': 'Modelo entrenado sin datos de 2025 y sin conjunto de validación'
 }
 
+# Asegurar que se guarde con el nombre exacto que espera ES.py: model_2025_gpMonza.pkl
 save_model(model, features, metadata, MODEL_FILENAME)
+print(f"[OK] Modelo guardado como: {MODEL_FILENAME}")
 
 print("\nOK MODELO XGBOOST LISTO\n")

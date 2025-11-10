@@ -7,13 +7,12 @@ import fastf1
 # Parámetros del circuito y carrera
 YEAR = 2025
 GP = "Monza"
-DRIVER = "VER"  # Para obtener datos de referencia
 CANT_VUELTAS = 53  # Número de vueltas en la carrera (ajustar según circuito)
 
 # Parámetros del algoritmo evolutivo
 POP_SIZE = 100
-NGEN = 100
-PMUT = 0.9
+NGEN = 200
+PMUT = 0.90
 
 # Tiempo de pit stop 
 PIT_STOP_TIME = 25.0 
@@ -39,19 +38,33 @@ features = model_data['features']
 metadata = model_data['metadata']
 
 print(f"  Circuito: {metadata['circuit']}")
-print(f"  R² Validación: {metadata['r2_val']:.3f}")
-print(f"  MAE: {metadata['mae_val']:.3f}s")
+# Manejar caso cuando no hay validación (r2_val y mae_val son None)
+if metadata.get('r2_val') is not None:
+    print(f"  R² Validación: {metadata['r2_val']:.3f}")
+    print(f"  MAE Validación: {metadata['mae_val']:.3f}s")
+else:
+    r2_train = metadata.get('r2_train')
+    mae_train = metadata.get('mae_train')
+    if r2_train is not None:
+        print(f"  R² Entrenamiento: {r2_train:.3f}")
+    else:
+        print(f"  R² Entrenamiento: N/A")
+    if mae_train is not None:
+        print(f"  MAE Entrenamiento: {mae_train:.3f}s")
+    else:
+        print(f"  MAE Entrenamiento: N/A")
+    print(f"  [NOTA] Modelo entrenado sin conjunto de validación")
 
 # Configurar cache de FastF1
 cache_dir = os.path.join(os.path.dirname(__file__), 'cache')
 os.makedirs(cache_dir, exist_ok=True)
 fastf1.Cache.enable_cache(cache_dir)
 
-# Cargar datos de referencia de las prácticas/qualifying
+# Cargar datos de referencia de las prácticas/qualifying (solo datos meteorológicos)
 print(f"\n[OK] Cargando datos de referencia de {YEAR} {GP}...")
 reference_conditions = {}
 
-# Intentar cargar sesiones de práctica y qualifying (CON telemetría)
+# Intentar cargar sesiones de práctica y qualifying (solo datos meteorológicos, sin telemetría)
 sessions_to_try = ["Q", "FP3", "FP2", "FP1"]
 loaded_session = None
 loaded_session_type = None
@@ -60,8 +73,8 @@ for session_type in sessions_to_try:
     try:
         print(f"  Intentando {session_type}...", end=" ")
         session = fastf1.get_session(YEAR, GP, session_type)
-        # Cargar CON telemetría para poder obtener datos de velocidad
-        session.load(telemetry=True, weather=True, messages=False)
+        # Cargar solo datos meteorológicos (sin telemetría, ya no se necesita)
+        session.load(telemetry=False, weather=True, messages=False)
         loaded_session = session
         loaded_session_type = session_type
         print("OK")
@@ -76,7 +89,7 @@ if loaded_session is None:
 
 print(f"  Sesión cargada: {loaded_session_type}")
 
-# Extraer condiciones promedio de la sesión
+# Extraer condiciones promedio de la sesión (solo datos meteorológicos)
 if hasattr(loaded_session, "weather_data") and loaded_session.weather_data is not None and len(loaded_session.weather_data) > 0:
     reference_conditions["TrackTemp"] = loaded_session.weather_data["TrackTemp"].mean()
     reference_conditions["AirTemp"] = loaded_session.weather_data["AirTemp"].mean()
@@ -87,88 +100,13 @@ else:
     reference_conditions["AirTemp"] = 25.0
     reference_conditions["Humidity"] = 50.0
 
-# Obtener telemetría promedio del piloto de referencia
-print(f"\n[OK] Obteniendo telemetría de referencia de {DRIVER}...")
-
-telemetry_obtained = False
-error_message = ""
-
-try:
-    driver_laps = loaded_session.laps.pick_driver(DRIVER).pick_quicklaps()
-    
-    if len(driver_laps) == 0:
-        error_message = f"No se encontraron vueltas rápidas para {DRIVER}"
-        raise Exception(error_message)
-    
-    # Calcular promedios de telemetría
-    speed_values = []
-    throttle_values = []
-    
-    print(f"  Procesando {min(5, len(driver_laps))} vueltas...", end=" ")
-    
-    for idx in driver_laps.index[:5]:  # Solo primeras 5 vueltas rápidas
-        try:
-            telem = driver_laps.loc[idx].get_car_data()
-            if telem is not None and len(telem) > 0:
-                if 'Speed' in telem.columns and 'Throttle' in telem.columns:
-                    max_speed = telem['Speed'].max()
-                    avg_throttle = telem['Throttle'].mean()
-                    
-                    # Validar que los datos sean razonables
-                    if max_speed > 0 and not np.isnan(max_speed):
-                        speed_values.append(max_speed)
-                    if avg_throttle >= 0 and not np.isnan(avg_throttle):
-                        throttle_values.append(avg_throttle)
-        except Exception as e:
-            continue
-    
-    if len(speed_values) == 0 or len(throttle_values) == 0:
-        error_message = f"No se pudo extraer telemetría válida de las vueltas de {DRIVER}"
-        raise Exception(error_message)
-    
-    # Asignar valores promedio
-    reference_conditions["MaxSpeed"] = np.mean(speed_values)
-    reference_conditions["AvgSpeed"] = np.mean(speed_values) * 0.75  # Estimación conservadora
-    reference_conditions["AvgThrottle"] = np.mean(throttle_values)
-    
-    print(f"OK ({len(speed_values)} vueltas procesadas)")
-    telemetry_obtained = True
-    
-except Exception as e:
-    print(f"ERROR")
-    if error_message:
-        print(f"\n[X] {error_message}")
-    else:
-        print(f"\n[X] Error al obtener telemetría: {str(e)}")
-    print(f"\n[!] El algoritmo requiere datos de telemetría reales para funcionar correctamente.")
-    print(f"[!] Verifica que:")
-    print(f"    - El piloto '{DRIVER}' participó en la sesión")
-    print(f"    - Hay datos de telemetría disponibles")
-    print(f"    - La sesión se cargó correctamente")
-    raise SystemExit("\n[X] Ejecución cancelada: No hay telemetría válida")
-
-# Obtener equipo del piloto
-try:
-    team = loaded_session.results[loaded_session.results["Abbreviation"] == DRIVER]["TeamName"].iloc[0]
-    reference_conditions["Team"] = team
-except:
-    reference_conditions["Team"] = "Red Bull Racing"
-
 print(f"\n[OK] Condiciones de referencia:")
 print(f"  Sesión: {loaded_session_type}")
 print(f"  Temperatura pista: {reference_conditions['TrackTemp']:.1f}°C")
 print(f"  Temperatura aire: {reference_conditions['AirTemp']:.1f}°C")
 print(f"  Humedad: {reference_conditions['Humidity']:.1f}%")
-print(f"  Velocidad máxima: {reference_conditions['MaxSpeed']:.1f} km/h")
-print(f"  Velocidad promedio: {reference_conditions['AvgSpeed']:.1f} km/h")
-print(f"  Throttle promedio: {reference_conditions['AvgThrottle']:.1f}%")
-print(f"  Equipo: {reference_conditions['Team']}")
 
 print(f"\n[OK] Vueltas en carrera: {CANT_VUELTAS}")
-
-# Validación final antes de continuar
-if not telemetry_obtained:
-    raise SystemExit("\n[X] No se puede continuar sin telemetría válida")
 
 print("="*60)
 print("TODOS LOS DATOS CARGADOS CORRECTAMENTE")
@@ -189,18 +127,20 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
     features_dict = {
         # Categóricas
         "Compound": compound,
-        "SessionType": "R",  # Predecimos para carrera
-        "Team": conditions["Team"],
+        # SessionType ELIMINADA: Solo usamos datos de carrera, por lo que es constante
+        # Team ELIMINADA: No es relevante para predecir degradación de neumáticos
         
         # Neumáticos básicas
         "TyreLife": tyre_life,
-        "TyreWearRate": tyre_life / 50.0,  # Normalizar igual que en entrenamiento
+        # TyreWearRate ELIMINADA: correlación perfecta (1.0) con TyreLife
         "TyreLifeSquared": tyre_life ** 2,
-        "CompoundHardness": compound_hardness,
+        "TyreLifeCubed": tyre_life ** 3,
+        # CompoundHardness ELIMINADA: redundante con Compound (categórica)
         
         # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
+        # Esta feature permite al modelo aprender diferentes tasas de degradación por compuesto
         "TyreLifeByCompound": tyre_life * compound_hardness,
-        "RelativeTyreAge": tyre_life / compound_hardness,
+        # RelativeTyreAge ELIMINADA: correlacionada con TyreLife y CompoundHardness
         
         # Combustible
         "FuelLoad": fuel_load,
@@ -210,12 +150,9 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "TrackTemp": conditions["TrackTemp"],
         "AirTemp": conditions["AirTemp"],
         "Humidity": conditions["Humidity"],
-        "TempDiff": conditions["TrackTemp"] - conditions["AirTemp"],
         
-        # Telemetría
-        "MaxSpeed": conditions["MaxSpeed"],
-        "AvgSpeed": conditions["AvgSpeed"],
-        "AvgThrottle": conditions["AvgThrottle"]
+        # Telemetría ELIMINADA: MaxSpeed, AvgSpeed, AvgThrottle
+        # Features redundantes ELIMINADAS: TyreWearRate, RelativeTyreAge, CompoundHardness
     }
     
     return features_dict
@@ -229,8 +166,89 @@ def predict_lap_time(lap_number, compound, tyre_life, fuel_load, conditions, mod
     # Crear DataFrame con las features en el orden correcto
     X = pd.DataFrame([features_dict])[features]
     
+    # Verificar que todas las features estén presentes
+    missing_features = set(features) - set(X.columns)
+    if missing_features:
+        raise ValueError(f"Features faltantes: {missing_features}")
+    
+    # Verificar que no haya NaN
+    if X.isna().any().any():
+        # Rellenar NaN con valores por defecto
+        for col in X.columns:
+            if X[col].isna().any():
+                if col in ["Compound"]:
+                    X[col] = X[col].fillna("Unknown")
+                else:
+                    X[col] = X[col].fillna(0.0)
+    
+    # DEBUG: Verificar que el modelo sea un Pipeline
+    from sklearn.pipeline import Pipeline
+    if isinstance(model, Pipeline):
+        # El modelo es un Pipeline, debería funcionar correctamente
+        # Pero vamos a verificar que las features categóricas estén bien
+        categorical_features = ["Compound"]
+        for cat_feat in categorical_features:
+            if cat_feat in X.columns:
+                # Verificar que el valor sea válido
+                if X[cat_feat].iloc[0] not in ["SOFT", "MEDIUM", "HARD"]:
+                    # Si no es válido, usar un valor por defecto
+                    if cat_feat == "Compound":
+                        X[cat_feat] = "MEDIUM"
+    
     # Predecir (el modelo fue entrenado con log1p, así que usamos expm1)
-    log_pred = model.predict(X)[0]
-    lap_time = np.expm1(log_pred)
+    # El modelo es un Pipeline, así que aplicará el preprocesamiento automáticamente
+    try:
+        # Verificar que el Pipeline tenga los pasos correctos
+        from sklearn.pipeline import Pipeline
+        if isinstance(model, Pipeline):
+            # Obtener el preprocesador y el regresor
+            preprocessor = model.named_steps.get('pre', None)
+            regressor = model.named_steps.get('reg', None)
+            
+            if preprocessor is not None:
+                # Transformar las features con el preprocesador
+                X_transformed = preprocessor.transform(X)
+                
+                # Verificar que las features transformadas varíen
+                if X_transformed.shape[0] > 0:
+                    # Predecir con el regresor directamente
+                    if regressor is not None:
+                        log_pred = regressor.predict(X_transformed)
+                        if isinstance(log_pred, np.ndarray):
+                            log_pred = log_pred[0] if len(log_pred) > 0 else log_pred
+                    else:
+                        # Si no hay regresor, usar el Pipeline completo
+                        predictions = model.predict(X)
+                        if isinstance(predictions, np.ndarray):
+                            log_pred = predictions[0] if len(predictions) > 0 else predictions
+                        else:
+                            log_pred = predictions
+                else:
+                    raise ValueError("Features transformadas vacías")
+            else:
+                # Si no hay preprocesador, usar el Pipeline completo
+                predictions = model.predict(X)
+                if isinstance(predictions, np.ndarray):
+                    log_pred = predictions[0] if len(predictions) > 0 else predictions
+                else:
+                    log_pred = predictions
+        else:
+            # Si no es un Pipeline, predecir directamente
+            predictions = model.predict(X)
+            if isinstance(predictions, np.ndarray):
+                log_pred = predictions[0] if len(predictions) > 0 else predictions
+            else:
+                log_pred = predictions
+        
+        # Convertir de log a tiempo real
+        lap_time = np.expm1(log_pred)
+        
+        # Verificar si el tiempo es válido
+        if np.isnan(lap_time) or np.isinf(lap_time) or lap_time <= 0:
+            raise ValueError(f"Tiempo inválido: {lap_time}")
+            
+    except Exception as e:
+        # Si hay un error, mostrar el error y lanzar excepción
+        raise RuntimeError(f"Error en predicción del modelo: {e}")
     
     return lap_time

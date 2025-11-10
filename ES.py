@@ -10,13 +10,17 @@ warnings.filterwarnings("ignore")
 
 # Importar funciones y variables desde utils/ES/main.py
 from utils.ES.main import (
-    YEAR, GP, DRIVER, CANT_VUELTAS,
+    YEAR, GP, CANT_VUELTAS,
     POP_SIZE, NGEN, PMUT,
     PIT_STOP_TIME,
     reference_conditions,
     model, features, metadata,
-    predict_lap_time
+    predict_lap_time,
+    create_features_for_lap
 )
+
+# Flag de debugging (cambiar a True para activar debugging detallado)
+DEBUG_MODEL = False
 
 creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMin)
@@ -81,10 +85,6 @@ def validar_estrategia(individual):
     Valida que la estrategia cumpla con las reglas básicas de F1:
     - Al menos un pit stop
     - Al menos dos tipos de neumáticos diferentes
-    
-    Nota: No se validan límites explícitos de degradación.
-    El modelo aprenderá implícitamente que mantener un neumático
-    por mucho tiempo resulta en tiempos de vuelta peores.
     """
     gen = individual[0]
     tipos_usados = set(gen)
@@ -95,12 +95,69 @@ def validar_estrategia(individual):
     
     return True
 
+def format_strategy_short(ind):
+    """Formatea la estrategia en una línea corta"""
+    compound_counts = {}
+    for compound in ind[0]:
+        compound_counts[compound] = compound_counts.get(compound, 0) + 1
+    
+    # Ordenar compuestos por cantidad (mayor primero)
+    sorted_compounds = sorted(compound_counts.items(), key=lambda x: x[1], reverse=True)
+    # Formato: "1pits: SOFT(71) HARD(7)"
+    strategy_str = f"{ind.NumPitStop}pits: " + " ".join([f"{compound}({count})" for compound, count in sorted_compounds])
+    return strategy_str
+
+def debug_predictions(individual, max_laps_to_show=10):
+    """
+    Función de debugging para mostrar predicciones detalladas de una estrategia
+    """
+    print("\n" + "="*60)
+    print("DEBUG: Predicciones detalladas de la estrategia")
+    print("="*60)
+    
+    strategy_str = format_strategy_short(individual)
+    print(f"Estrategia: {strategy_str}")
+    print(f"Tiempo total: {individual.fitness.values[0]:.3f}s\n")
+    
+    # Mostrar predicciones para algunas vueltas clave
+    laps_to_show = [0] + list(range(10, min(CANT_VUELTAS, 60), 10)) + [CANT_VUELTAS-1]
+    laps_to_show = sorted(set(laps_to_show))[:max_laps_to_show]
+    
+    print("Predicciones por vuelta (muestra):")
+    print(f"{'Lap':<4} {'Compound':<8} {'TyreLife':<9} {'Fuel':<6} {'LapTime':<8} {'Features clave'}")
+    print("-" * 80)
+    
+    for lap in laps_to_show:
+        fuel_load = 1.0 - (lap / CANT_VUELTAS)
+        compound = individual[0][lap]
+        tyre_life = individual.TyreAge[lap]
+        
+        try:
+            lap_time = predict_lap_time(
+                lap, compound, tyre_life, fuel_load,
+                reference_conditions, model, features
+            )
+            
+            # Obtener features usadas
+            features_dict = create_features_for_lap(lap, compound, tyre_life, fuel_load, reference_conditions)
+            
+            features_str = f"T²={features_dict['TyreLifeSquared']:4d} T³={features_dict['TyreLifeCubed']:5d} "
+            features_str += f"T×C={features_dict['TyreLifeByCompound']:3.1f}"
+            
+            print(f"{lap:<4} {compound:<8} {tyre_life:<9} {fuel_load:<6.2f} {lap_time:<8.3f} {features_str}")
+        except Exception as e:
+            print(f"{lap:<4} {compound:<8} {tyre_life:<9} {fuel_load:<6.2f} ERROR: {e}")
+    
+    print("="*60 + "\n")
+
 def func_aptitud(individual):
     """
     Función de aptitud: minimizar tiempo total de carrera
     Usa el modelo predictivo para estimar tiempos de vuelta.
     El modelo ya incluye la degradación de neumáticos en sus predicciones,
-    por lo que no se necesitan penalizaciones explícitas.
+    por lo que aprenderá implícitamente que neumáticos más viejos son peores.
+    No hay penalizaciones explícitas: el algoritmo debe aprender por sí solo
+    qué estrategias son racionales basándose únicamente en las predicciones del modelo.
     """
     # Validar primero
     individual.Valid = validar_estrategia(individual)
@@ -120,15 +177,20 @@ def func_aptitud(individual):
         is_pit = individual.PitStop[lap]
         
         # Predecir tiempo de vuelta
-        # El modelo ya incluye la degradación de neumáticos (TyreLife, TyreWearRate)
-        # por lo que aprenderá implícitamente que neumáticos más viejos son peores
+        # El modelo ya incluye la degradación de neumáticos (TyreLife, TyreLifeSquared, 
+        # TyreLifeCubed, TyreLifeByCompound) por lo que aprenderá implícitamente que 
+        # neumáticos más viejos son peores, y podrá aprender diferentes tasas de degradación
+        # por compuesto usando la feature categórica Compound y TyreLifeByCompound.
         try:
             lap_time = predict_lap_time(
                 lap, compound, tyre_life, fuel_load,
                 reference_conditions, model, features
             )
+            # Verificar si el tiempo es válido (no NaN ni infinito)
+            if np.isnan(lap_time) or np.isinf(lap_time):
+                lap_time = 90.0  # Tiempo por defecto si es inválido
             total_time += lap_time
-        except:
+        except Exception as e:
             # Si hay error en predicción, usar penalización
             total_time += 90.0  # Tiempo por defecto
         
@@ -356,19 +418,6 @@ if __name__ == '__main__':
 
     print("[3/3] Evolución en progreso...\n")
     
-    # Función auxiliar para formatear estrategia de manera concisa
-    def format_strategy_short(ind):
-        """Formatea la estrategia en una línea corta"""
-        compound_counts = {}
-        for compound in ind[0]:
-            compound_counts[compound] = compound_counts.get(compound, 0) + 1
-        
-        # Ordenar compuestos por cantidad (mayor primero)
-        sorted_compounds = sorted(compound_counts.items(), key=lambda x: x[1], reverse=True)
-        # Formato: "1pits: SOFT(71) HARD(7)"
-        strategy_str = f"{ind.NumPitStop}pits: " + " ".join([f"{compound}({count})" for compound, count in sorted_compounds])
-        return strategy_str
-    
     # Evolución
     for gen in range(1, NGEN + 1):
         try:
@@ -377,8 +426,22 @@ if __name__ == '__main__':
 
             record = stats.compile(pop)
             
-            # Obtener mejor individuo de esta generación
-            best_ind = tools.selBest(pop, 1)[0]
+            # Obtener top 5 mejores individuos de esta generación
+            # Ordenar población por fitness y obtener únicos por estrategia
+            sorted_pop = sorted(pop, key=lambda ind: ind.fitness.values[0])
+            unique_ind = []
+            seen_strategies = set()
+            
+            for ind in sorted_pop:
+                # Crear un hash de la estrategia para verificar unicidad
+                strategy_hash = tuple(ind[0])  # La estrategia es la lista de compuestos
+                if strategy_hash not in seen_strategies:
+                    unique_ind.append(ind)
+                    seen_strategies.add(strategy_hash)
+                if len(unique_ind) >= 5:
+                    break
+            
+            top5_ind = unique_ind[:5]
             
             # Convertir tiempo a minutos:segundos
             min_time = record['min']
@@ -389,9 +452,19 @@ if __name__ == '__main__':
             avg_minutes = int(avg_time // 60)
             avg_seconds = avg_time % 60
             
-            # Mostrar cada generación
-            strategy_str = format_strategy_short(best_ind)
-            print(f"Gen {gen:3d}/{NGEN}: min={min_minutes}:{min_seconds:05.2f} avg={avg_minutes}:{avg_seconds:05.2f} | {strategy_str}")
+            # Mostrar cada generación con top 5
+            print(f"Gen {gen:3d}/{NGEN}: min={min_minutes}:{min_seconds:05.2f} avg={avg_minutes}:{avg_seconds:05.2f}")
+            for rank, ind in enumerate(top5_ind, 1):
+                strategy_str = format_strategy_short(ind)
+                total_time = ind.fitness.values[0]
+                total_minutes = int(total_time // 60)
+                total_seconds = total_time % 60
+                # Mostrar con más precisión (3 decimales) para ver diferencias
+                print(f"  #{rank}: {total_minutes}:{total_seconds:06.3f} ({total_time:.3f}s) | {strategy_str}")
+            
+            # Debugging opcional para la mejor estrategia de la primera generación
+            if DEBUG_MODEL and gen == 1 and len(top5_ind) > 0:
+                debug_predictions(top5_ind[0])
         except Exception as e:
             print(f"\n[!] Error en generación {gen}: {str(e)}")
             print(f"[!] Continuando con la población actual...")
@@ -400,60 +473,21 @@ if __name__ == '__main__':
     
     print(f"\n[OK] Completadas {NGEN} generaciones\n")
 
-    # Mejor estrategia
-    print("\n" + "="*60)
-    print("MEJOR ESTRATEGIA ENCONTRADA")
-    print("="*60 + "\n")
-    
+    # Obtener la mejor estrategia
     best = tools.selBest(pop, 1)[0]
-    
     total_time = best.fitness.values[0]
     total_minutes = int(total_time // 60)
     total_seconds = total_time % 60
-    
-    print(f"Tiempo total estimado: {total_minutes}:{total_seconds:05.2f}")
-    print(f"Número de pit stops: {best.NumPitStop}")
-    print(f"Válida: {best.Valid}\n")
-    
-    # Analizar stints
-    print("ESTRATEGIA POR STINTS:")
-    print("-" * 60)
-    
-    current_compound = best[0][0]
-    stint_start = 0
-    stint_number = 1
-    
-    for lap in range(1, CANT_VUELTAS + 1):
-        if lap == CANT_VUELTAS or best[0][lap] != current_compound:
-            stint_length = lap - stint_start
-            print(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {current_compound}")
-            
-            if lap < CANT_VUELTAS:
-                current_compound = best[0][lap]
-                stint_start = lap
-                stint_number += 1
-    
-    print("-" * 60)
-    
-    # Resumen de compuestos
-    print("\nRESUMEN DE COMPUESTOS:")
-    compound_counts = {}
-    for compound in best[0]:
-        compound_counts[compound] = compound_counts.get(compound, 0) + 1
-    
-    for compound, count in sorted(compound_counts.items()):
-        print(f"  {compound}: {count} vueltas ({count/CANT_VUELTAS*100:.1f}%)")
     
     print("\n" + "="*60)
     print("OPTIMIZACIÓN COMPLETADA")
     print("="*60 + "\n")
     
     # Guardar estrategia
-    output_file = f"best_strategy_{YEAR}_{GP}_{DRIVER}.txt"
+    output_file = f"best_strategy_{YEAR}_{GP}.txt"
     with open(output_file, 'w') as f:
         f.write(f"MEJOR ESTRATEGIA - {YEAR} {GP} ({metadata['circuit']})\n")
         f.write("="*60 + "\n\n")
-        f.write(f"Piloto de referencia: {DRIVER}\n")
         f.write(f"Tiempo total estimado: {total_minutes}:{total_seconds:05.2f}\n")
         f.write(f"Número de pit stops: {best.NumPitStop}\n\n")
         f.write("ESTRATEGIA POR STINTS:\n")
