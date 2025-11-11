@@ -242,10 +242,25 @@ def seleccion(population, k):
             del ind_aux.fitness.values
             mut123.append(ind_aux)
 
-    new_pop = mejoresK + mut1 + mut2 + mut3 + mut123
+    hijos = []
+    for _ in range(1,len(mejoresK)//2):
+        p1,p2 = random.sample(mejoresK,2)
+        hijo1 = toolbox.clone(p1)
+        hijo2 = toolbox.clone(p2) 
+        del hijo1.fitness.values
+        del hijo2.fitness.values
+        
+        if hijo1.NumPitStop == 0 or hijo2.NumPitStop == 0: #Cruzar solo si ambos tienen pit stops
+            continue
 
-    #for _ in range(1,len(mejoresK)//2):
-    #    toolbox.mate(random.choice(mejoresK), random.choice(mejoresK)) #######################
+        toolbox.mate(hijo1,hijo2)
+        
+        if(hijo1.Valid):
+            hijos.append(hijo1)
+        if(hijo2.Valid):    
+            hijos.append(hijo2)
+
+    new_pop = mejoresK + mut1 + mut2 + mut3 + mut123 + hijos
 
     num_random = POP_SIZE - len(new_pop)
     for _ in range(num_random):
@@ -254,8 +269,118 @@ def seleccion(population, k):
     return new_pop
 
 def cruza(ind1, ind2):
+    #Teniendo dos padres dividirlos en dos mitades en donde ocurrio un pitstop
+    #Agarrar la primera mitad de un padre y la segunda del otro y formar una nueva estrategia
+    #Si se superponen en vueltas elegir aleatoreamente q domine uno
+    #Si faltan vueltas extender el ultimo stint del padre 1
+    padre1 = toolbox.clone(ind1)
+    padre2 = toolbox.clone(ind2)
     
-    pass
+    pit_indices_1 = [i for i,v in enumerate(padre1.PitStop) if v == 1]
+    idx_1 = random.choice(pit_indices_1)
+
+    pit_indices_2 = [i for i,v in enumerate(padre2.PitStop) if v == 1]
+    idx_2 = random.choice(pit_indices_2)
+
+    #print("Puntos de cruza elegidos: Padre1 en vuelta", idx_1, ", Padre2 en vuelta", idx_2)
+
+    # Intercambiar stints
+    gen1 = padre1[0]
+    gen2 = padre2[0]
+
+    mitad1_padre1 = gen1[:idx_1]
+    mitad2_padre1 = gen1[idx_1:]
+    
+    mitad1_padre2 = gen2[:idx_2]
+    mitad2_padre2 = gen2[idx_2:]
+    
+    #Hijo 1
+    new_gen = None
+    new_pit_stops = None
+    if  len(mitad1_padre1) + len(mitad2_padre2) > CANT_VUELTAS:
+        # Superposición, elegir aleatoriamente qué mitad domina
+        extra = len(mitad1_padre1) + len(mitad2_padre2) - CANT_VUELTAS 
+        if random.random() < 0.5:
+            new_gen = mitad1_padre1[:len(mitad1_padre1)-extra] + mitad2_padre2 
+            new_pit_stops = padre1.PitStop[:len(mitad1_padre1)-extra] + padre2.PitStop[len(mitad1_padre1)-extra:]
+            new_pit_stops[len(mitad1_padre1)-extra] = 1 #Creo que no es necesario ya que deberia ser 1 desde el padre2
+        else:
+            new_gen = mitad1_padre1 + mitad2_padre2[extra:]
+            new_pit_stops = padre1.PitStop[:len(mitad1_padre1)] + padre2.PitStop[len(mitad1_padre1):]
+            new_pit_stops[len(mitad1_padre1)] = 1
+           
+    else:
+        # No hay superposición, extender el último stint del padre1 si faltan vueltas
+        i=0
+        new_pit_stops = padre1.PitStop[:len(mitad1_padre1)]
+        extra = CANT_VUELTAS - (len(mitad1_padre1)+len(mitad2_padre2))
+        while i < extra:
+            mitad1_padre1.append(mitad1_padre1[-1])
+            new_pit_stops.append(0)
+            i+=1
+        new_gen = mitad1_padre1 + mitad2_padre2 
+        new_pit_stops += padre2.PitStop[len(mitad1_padre1):]
+
+    ind1[0] = new_gen
+    ind1.PitStop = new_pit_stops
+
+    # Recalcular TyreAge, NumPitStop del inviduo 1
+    tyre_age = []
+    last_age = 0
+    for i in range(len(new_gen)):
+        if new_pit_stops[i] == 1:
+            last_age = 0
+            tyre_age.append(0)
+        else:
+            last_age += 1 if i > 0 else 0
+            tyre_age.append(last_age)
+    ind1.TyreAge = tyre_age
+    ind1.NumPitStop = sum(new_pit_stops)
+    ind1.Valid = validar_estrategia(ind1)
+    
+    #Hijo 2
+    new_gen = None
+    new_pit_stops = None
+    if  len(mitad1_padre2) + len(mitad2_padre1) > CANT_VUELTAS:
+        # Superposición, elegir aleatoriamente qué mitad domina
+        extra = len(mitad1_padre2) + len(mitad2_padre1) - CANT_VUELTAS
+        if random.random() < 0.5:
+            new_gen = mitad1_padre2[:len(mitad1_padre2)-extra] + mitad2_padre1 
+            new_pit_stops = padre2.PitStop[:len(mitad1_padre2)-extra] + padre1.PitStop[len(mitad1_padre2)-extra:]
+            new_pit_stops[len(mitad1_padre2)-extra] = 1 #Creo que no es necesario ya que deberia ser 1 desde el padre1
+        else:
+            new_gen = mitad1_padre2 + mitad2_padre1[extra:]
+            new_pit_stops = padre2.PitStop[:len(mitad1_padre2)] + padre1.PitStop[len(mitad1_padre2):]
+            new_pit_stops[len(mitad1_padre2)] = 1
+    else:
+        # No hay superposición, extender el último stint del padre1 si faltan vueltas
+        i=0
+        new_pit_stops = padre2.PitStop[:len(mitad1_padre2)]
+        Extra = CANT_VUELTAS - (len(mitad1_padre2)+len(mitad2_padre1))
+        while i < Extra:
+            mitad1_padre2.append(mitad1_padre2[-1])
+            new_pit_stops.append(0)
+            i+=1
+        new_gen = mitad1_padre2 + mitad2_padre1 
+        new_pit_stops += padre1.PitStop[len(mitad1_padre2):]
+
+    ind2[0] = new_gen
+    ind2.PitStop = new_pit_stops
+    # Recalcular TyreAge, NumPitStop del inviduo 1
+    tyre_age = []
+    last_age = 0
+    for i in range(len(new_gen)):
+        if new_pit_stops[i] == 1:
+            last_age = 0
+            tyre_age.append(0)
+        else:
+            last_age += 1 if i > 0 else 0
+            tyre_age.append(last_age)
+    ind2.TyreAge = tyre_age
+    ind2.NumPitStop = sum(new_pit_stops)
+    ind2.Valid = validar_estrategia(ind2)
+
+
 
 toolbox.register("mate", cruza)
 
@@ -429,6 +554,7 @@ if __name__ == '__main__':
     stats.register("max", np.max)
 
     k = POP_SIZE // 6 #Número de mejores individuos a seleccionar
+    print(f"\nSeleccionando los mejores {k} individuos por generación.\n")
 
     print("[3/3] Evolución en progreso...\n")
     
@@ -436,6 +562,7 @@ if __name__ == '__main__':
     for gen in range(1, NGEN + 1):
         try:
             offspring = toolbox.select(pop, k)
+            print("Cantidad de individuos en la nueva población:", len(offspring),"(deberian ser",POP_SIZE,")")
             pop[:] = offspring
 
             #Evaluar individuos nuevos
