@@ -3,8 +3,6 @@ import numpy as np
 import pandas as pd
 import random
 from deap import base, creator, tools
-import fastf1
-import joblib
 import warnings
 from scoop import futures ################### pip install scoop
 warnings.filterwarnings("ignore")

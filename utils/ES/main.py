@@ -7,23 +7,19 @@ import fastf1
 # Parámetros del circuito y carrera
 YEAR = 2025
 GP = "Monza"
-CANT_VUELTAS = 53  # Número de vueltas en la carrera (ajustar según circuito)
+CANT_VUELTAS = 53  # Número de vueltas en la carrera
 
 # Parámetros del algoritmo evolutivo
-POP_SIZE = 100
+POP_SIZE = 200
 NGEN = 200
 PMUT = 0.90
 
 # Tiempo de pit stop 
 PIT_STOP_TIME = 25.0 
 
-# NOTA: Se eliminaron los límites explícitos de vueltas por compuesto.
-# El modelo de predicción aprenderá implícitamente que mantener un neumático
-# por mucho tiempo resulta en tiempos de vuelta peores debido a la degradación.
-
 # Cargar modelo
 # El modelo se guarda en utils/XGBoost/models/, así que buscamos ahí
-base_dir = os.path.dirname(os.path.dirname(__file__))  # Sube a 'utils'
+base_dir = os.path.dirname(os.path.dirname(__file__)) 
 models_dir = os.path.join(base_dir, 'XGBoost', 'models')
 MODEL_FILENAME = f"model_{YEAR}_gp{GP}.pkl"
 model_path = os.path.join(models_dir, MODEL_FILENAME)
@@ -38,7 +34,6 @@ features = model_data['features']
 metadata = model_data['metadata']
 
 print(f"  Circuito: {metadata['circuit']}")
-# Manejar caso cuando no hay validación (r2_val y mae_val son None)
 if metadata.get('r2_val') is not None:
     print(f"  R² Validación: {metadata['r2_val']:.3f}")
     print(f"  MAE Validación: {metadata['mae_val']:.3f}s")
@@ -127,20 +122,14 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
     features_dict = {
         # Categóricas
         "Compound": compound,
-        # SessionType ELIMINADA: Solo usamos datos de carrera, por lo que es constante
-        # Team ELIMINADA: No es relevante para predecir degradación de neumáticos
-        
         # Neumáticos básicas
         "TyreLife": tyre_life,
-        # TyreWearRate ELIMINADA: correlación perfecta (1.0) con TyreLife
         "TyreLifeSquared": tyre_life ** 2,
         "TyreLifeCubed": tyre_life ** 3,
-        # CompoundHardness ELIMINADA: redundante con Compound (categórica)
         
         # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
         # Esta feature permite al modelo aprender diferentes tasas de degradación por compuesto
         "TyreLifeByCompound": tyre_life * compound_hardness,
-        # RelativeTyreAge ELIMINADA: correlacionada con TyreLife y CompoundHardness
         
         # Combustible
         "FuelLoad": fuel_load,
@@ -150,9 +139,6 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "TrackTemp": conditions["TrackTemp"],
         "AirTemp": conditions["AirTemp"],
         "Humidity": conditions["Humidity"],
-        
-        # Telemetría ELIMINADA: MaxSpeed, AvgSpeed, AvgThrottle
-        # Features redundantes ELIMINADAS: TyreWearRate, RelativeTyreAge, CompoundHardness
     }
     
     return features_dict
