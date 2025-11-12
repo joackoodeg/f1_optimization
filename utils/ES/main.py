@@ -127,8 +127,9 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "TyreLifeByCompound": tyre_life * compound_hardness,
         # Combustible
         "FuelLoad": fuel_load,
+        # Temperatura
+        "TrackTemp": conditions["TrackTemp"],
         # Temperatura (comentadas para uso futuro)
-        #"TrackTemp": conditions["TrackTemp"],
         #"AirTemp": conditions["AirTemp"],
         #"Humidity": conditions["Humidity"],
     }
