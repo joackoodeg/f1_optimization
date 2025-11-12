@@ -210,6 +210,7 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             
             # 1. FILTRO CRÍTICO: Solo quicklaps (vueltas rápidas y válidas)
             # Este filtro elimina: outlaps, inlaps, vueltas con errores, pit stops, etc.
+            # Es el filtro MÁS IMPORTANTE de FastF1
             laps_before = len(laps)
             laps = laps.pick_quicklaps()
             filter_stats['not_quicklaps'] += (laps_before - len(laps))
@@ -308,18 +309,8 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             if len(laps) > 0 and 'LapNumber' in laps.columns:
                 laps = laps.sort_values('LapNumber').reset_index(drop=True)
             
-            # 9. Outliers: proteger pitstops y preservar continuidad de degradación
-            # IMPORTANTE: Factor 2.0 (estricto) porque pick_quicklaps() ya limpió mucho
-            if len(laps) > 10:
-                laps_before = len(laps)
-                laps = detect_outliers_iqr(
-                    laps, 
-                    column='LapTimeSec', 
-                    factor=2.0,  # Más estricto porque pick_quicklaps() ya filtró
-                    protect_pitstops=True, 
-                    preserve_continuity=True
-                )
-                filter_stats['outliers'] += (laps_before - len(laps))
+            # 9. Outliers: NO SE UTILIZA - pick_quicklaps() ya hizo el trabajo
+            # detect_outliers_iqr() eliminado porque pick_quicklaps() es suficiente
             
             if len(laps) > 0:
                 all_laps.append(laps)
@@ -373,8 +364,9 @@ def create_features(df):
     
     # RelativeTyreAge ELIMINADA: correlacionada con TyreLife y CompoundHardness
     
-    # Combustible
-    df["FuelPenalty"] = df["FuelLoad"] * 3.0
+    # Combustible - SOLO FuelLoad, SIN FuelPenalty
+    # FuelPenalty ELIMINADO temporalmente para ver comportamiento sin él
+    # df["FuelPenalty"] = df["FuelLoad"] * 3.0
     
     return df
 
@@ -520,14 +512,14 @@ def train_model(df):
     print("ENTRENANDO MODELO XGBOOST")
     print("="*60 + "\n")
     
-    # Features para el modelo
+    # Features para el modelo (SIN FuelPenalty)
     feature_cols = [
         'TyreLife',
         'TyreLifeSquared',
         'TyreLifeCubed',
         'TyreLifeByCompound',
         'FuelLoad',
-        'FuelPenalty',
+        # 'FuelPenalty',  # ELIMINADO TEMPORALMENTE
         'TrackTemp'
     ]
     
