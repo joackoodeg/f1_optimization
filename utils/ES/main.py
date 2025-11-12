@@ -113,25 +113,42 @@ print("="*60 + "\n")
 
 def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditions):
     """
-    Crea features para una vuelta específica
+    Crea features para una vuelta específica (OPTIMIZADAS basadas en correlación)
+    
+    Features finales (seleccionadas según correlación con target):
+    - TyreLife: Edad del neumático (corr=0.0692)
+    - TyreLifeNormalized: Degradación relativa por compuesto (corr=0.1619) ✅
+    - FuelLoad: Carga de combustible (corr=0.3645)
+    - FuelLoad_TyreLife: Interacción combustible-degradación (corr=0.3966) ✅
+    
+    Eliminadas:
+    - TyreLifeSquared (corr=0.0548, peor que TyreLife)
+    - TyreLifeCubed (corr=0.0306, muy baja)
+    - TyreLifeByCompound (corr=-0.0194, negativa)
+    - TrackTemp (constante, no aporta información)
     """
-    # Mapeo de compuestos
-    compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
-    compound_hardness = compound_map.get(compound, 2)
+    # Valores típicos de vida útil máxima por compuesto
+    max_life_by_compound = {
+        "SOFT": 25.0,
+        "MEDIUM": 35.0,
+        "HARD": 50.0
+    }
+    max_life = max_life_by_compound.get(compound, 35.0)
     
     features_dict = {
         # Categóricas
         "Compound": compound,
         # Neumáticos
         "TyreLife": tyre_life,
-        "TyreLifeByCompound": tyre_life * compound_hardness,
+        "TyreLifeNormalized": tyre_life / max_life,
         # Combustible
         "FuelLoad": fuel_load,
-        # Temperatura
-        "TrackTemp": conditions["TrackTemp"],
-        # Temperatura (comentadas para uso futuro)
-        #"AirTemp": conditions["AirTemp"],
-        #"Humidity": conditions["Humidity"],
+        # Interacciones
+        "FuelLoad_TyreLife": fuel_load * tyre_life,
+        # TyreLifeSquared eliminado (corr=0.0548, peor que TyreLife)
+        # TyreLifeCubed eliminado (corr=0.0306, muy baja)
+        # TrackTemp eliminado (no aporta información, constante)
+        # TyreLifeByCompound eliminado (corr=-0.0194, negativa)
     }
     
     return features_dict

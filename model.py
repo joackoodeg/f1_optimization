@@ -141,18 +141,22 @@ if 'SessionType' in train_data.columns:
         print(f"  [OK] Verificado: Solo datos de carrera (Train: {len(train_data)})")
 print()
 
-# FEATURES FINALES
-# Solo las features esenciales para capturar degradación de neumáticos
+# FEATURES FINALES (OPTIMIZADAS basadas en correlación)
+# Features seleccionadas según análisis de correlación con target
 features = [
     # Categóricas
     "Compound",
     # Neumáticos
-    "TyreLife", 
-    "TyreLifeByCompound",
+    "TyreLife",              # Edad del neumático (corr=0.0692)
+    "TyreLifeNormalized",    # Degradación relativa por compuesto (corr=0.1619) ✅
     # Combustible
-    "FuelLoad",
-    # Temperatura (para uso futuro)
-    "TrackTemp"
+    "FuelLoad",              # Carga de combustible (corr=0.3645)
+    # Interacciones
+    "FuelLoad_TyreLife"      # Interacción combustible-degradación (corr=0.3966) ✅
+    # TyreLifeSquared eliminado (corr=0.0548, peor que TyreLife)
+    # TyreLifeCubed eliminado (corr=0.0306, muy baja)
+    # TrackTemp eliminado (no aporta información, constante)
+    # TyreLifeByCompound eliminado (corr=-0.0194, negativa)
 ]
 
 print(f"  Features: {len(features)}\n")
@@ -168,9 +172,8 @@ X_train[numerical_features] = X_train[numerical_features].fillna(X_train[numeric
 
 # Debug: Verificar variación de features
 print("Variación de features en el conjunto de entrenamiento:")
-varying_features = ['TyreLife', 'TyreLifeByCompound', 'FuelLoad']
-constant_features = ['TrackTemp']
-for feat_name in varying_features + constant_features:
+varying_features = ['TyreLife', 'TyreLifeNormalized', 'FuelLoad', 'FuelLoad_TyreLife']
+for feat_name in varying_features:
     if feat_name in X_train.columns:
         std_val = X_train[feat_name].std()
         mean_val = X_train[feat_name].mean()
@@ -209,7 +212,7 @@ print()
 print("Correlación de features con el target (LapTimeSec):")
 train_data_with_target = train_data.copy()
 train_data_with_target['LapTimeSec'] = train_data['LapTimeSec']
-for feat_name in varying_features + constant_features:
+for feat_name in varying_features:
     if feat_name in train_data_with_target.columns:
         corr = train_data_with_target[feat_name].corr(train_data_with_target['LapTimeSec'])
         print(f"  {feat_name}: corr={corr:.4f}")
@@ -218,7 +221,7 @@ for feat_name in varying_features + constant_features:
 print("\n" + "="*60)
 print("Correlación entre features de neumáticos:")
 print("Matriz de correlación:")
-tyre_features = ['TyreLife', 'TyreLifeByCompound']
+tyre_features = ['TyreLife', 'TyreLifeNormalized']
 for i, feat1 in enumerate(tyre_features):
     for feat2 in tyre_features[i+1:]:
         if feat1 in train_data.columns and feat2 in train_data.columns:
@@ -294,7 +297,7 @@ print()
 
 # Mostrar features numéricas y su importancia
 print("Features numéricas:")
-varying_features = ['TyreLife', 'TyreLifeByCompound', 'FuelLoad']
+varying_features = ['TyreLife', 'TyreLifeNormalized', 'FuelLoad', 'FuelLoad_TyreLife']
 for feat_name in varying_features:
     if feat_name in feature_names_after_preprocessing:
         idx = feature_names_after_preprocessing.index(feat_name)

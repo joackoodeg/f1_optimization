@@ -187,8 +187,8 @@ def debug_predictions(individual, max_laps_to_show=10):
             # Obtener features usadas
             features_dict = create_features_for_lap(lap, compound, tyre_life, fuel_load, reference_conditions)
             
-            features_str = f"T²={features_dict.get('TyreLifeSquared', 0):4d} T³={features_dict.get('TyreLifeCubed', 0):5d} "
-            features_str += f"T×C={features_dict['TyreLifeByCompound']:3.1f}"
+            features_str = f"T={tyre_life:2.0f} T_norm={features_dict.get('TyreLifeNormalized', 0):.2f} "
+            features_str += f"F×T={features_dict.get('FuelLoad_TyreLife', 0):.1f}"
             
             print(f"{lap:<4} {compound:<8} {tyre_life:<9} {fuel_load:<6.2f} {lap_time:<8.3f} {features_str}")
         except Exception as e:

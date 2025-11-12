@@ -230,15 +230,40 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
 
 def create_features(df):
     """
-    Features MÍNIMAS y ROBUSTAS
-    Solo las que realmente importan
-    """
-    # Compuesto numérico (solo para calcular TyreLifeByCompound)
-    compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
-    df["CompoundHardness"] = df["Compound"].map(compound_map)
+    Features OPTIMIZADAS basadas en análisis de correlación
     
-    # Interacción compuesto-edad (degradación por tipo de neumático)
-    df["TyreLifeByCompound"] = df["TyreLife"] * df["CompoundHardness"]
+    Features finales (basadas en correlación con target):
+    - TyreLife: Edad del neumático (corr=0.0692)
+    - TyreLifeNormalized: Degradación relativa por compuesto (corr=0.1619) ✅ MEJOR
+    - FuelLoad: Carga de combustible (corr=0.3645)
+    - FuelLoad_TyreLife: Interacción combustible-degradación (corr=0.3966) ✅ MEJOR
+    
+    Eliminadas:
+    - TyreLifeSquared (corr=0.0548, peor que TyreLife)
+    - TyreLifeCubed (corr=0.0306, muy baja)
+    - TyreLifeByCompound (corr=-0.0194, negativa)
+    - TrackTemp (constante, no aporta información)
+    
+    Justificación: Las features polinómicas tienen correlaciones más bajas y pueden
+    causar multicolinealidad. XGBoost puede aprender interacciones no lineales automáticamente.
+    """
+    # Degradación normalizada por compuesto
+    # Permite comparar degradación relativa entre compuestos diferentes
+    # Valores típicos de vida útil máxima por compuesto (basados en datos históricos)
+    max_life_by_compound = {
+        "SOFT": 25.0,    # SOFT típicamente dura ~25 vueltas
+        "MEDIUM": 35.0,  # MEDIUM ~35 vueltas
+        "HARD": 50.0     # HARD ~50 vueltas
+    }
+    
+    df["TyreLifeNormalized"] = df.apply(
+        lambda row: row["TyreLife"] / max_life_by_compound.get(row["Compound"], 35.0),
+        axis=1
+    )
+    
+    # Interacción FuelLoad-TyreLife
+    # Captura el efecto combinado de combustible y degradación
+    df["FuelLoad_TyreLife"] = df["FuelLoad"] * df["TyreLife"]
     
     return df
 
@@ -308,7 +333,7 @@ def analyze_degradation(df):
     # Análisis de correlación
     print("\n" + "="*60)
     print("Correlación entre features de neumáticos:")
-    tyre_features = ['TyreLife', 'TyreLifeByCompound']
+    tyre_features = ['TyreLife', 'TyreLifeNormalized']
     
     if all(f in df.columns for f in tyre_features):
         corr_matrix = df[tyre_features].corr()
@@ -326,12 +351,16 @@ def train_model(df):
     print("ENTRENANDO MODELO XGBOOST")
     print("="*60 + "\n")
     
-    # Features para el modelo
+    # Features para el modelo (OPTIMIZADAS basadas en correlación)
     feature_cols = [
-        'TyreLife',
-        'TyreLifeByCompound',
-        'FuelLoad',
-        'TrackTemp'
+        'TyreLife',              # Edad del neumático (corr=0.0692)
+        'TyreLifeNormalized',    # Degradación relativa por compuesto (corr=0.1619) ✅
+        'FuelLoad',              # Carga de combustible (corr=0.3645)
+        'FuelLoad_TyreLife'      # Interacción combustible-degradación (corr=0.3966) ✅
+        # TyreLifeSquared eliminado (corr=0.0548, peor que TyreLife)
+        # TyreLifeCubed eliminado (corr=0.0306, muy baja)
+        # TrackTemp eliminado (no aporta información, constante)
+        # TyreLifeByCompound eliminado (corr=-0.0194, negativa)
     ]
     
     categorical_cols = ['Compound']
