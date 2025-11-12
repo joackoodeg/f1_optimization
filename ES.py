@@ -57,8 +57,7 @@ def create_individual():
     NumPitStop = 0
 
     # Mapeo de enteros a compuestos
-    compound_names = ["SOFT", "MEDIUM", "HARD"]
-    compound = compound_names[random.randint(0, 2)]
+    compound = random.randint(0, 2)
     genTyreCompound.append(compound)
     TyreAge.append(0)
     PitStop.append(0)
@@ -74,7 +73,7 @@ def create_individual():
         
         if newTyre:
             # Elegir nuevo compuesto (evitar el mismo)
-            new_compound = random.choice([c for c in compound_names if c != compound])
+            new_compound = random.choice([c for c in [0,1,2] if c != compound])
             compound = new_compound
             genTyreCompound.append(compound)
             TyreAge.append(0)
@@ -436,7 +435,7 @@ def compound_mutation(individual):
         end += 1
 
     # Elegir nuevo compuesto (cualquiera excepto el actual)
-    opciones = ["SOFT", "MEDIUM", "HARD"]
+    opciones = [0,1,2]
     opciones.remove(comp0)
     new_comp = random.choice(opciones)
     
@@ -518,7 +517,7 @@ def add_pit_mutation(individual):
         return
     
     pits[j] = 1
-    new_comp = random.choice(["SOFT", "MEDIUM", "HARD"])
+    new_comp = random.choice([0,1,2])
     gen[j] = new_comp
 
     # Buscar fin del stint
