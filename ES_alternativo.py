@@ -54,7 +54,9 @@ def create_individual():
     Crea un individuo (estrategia) aleatorio.
     El modelo aprenderá implícitamente que mantener un neumático por mucho tiempo
     resulta en tiempos de vuelta peores.
-    genTyreCompound: lista de compuestos por vuelta (SOFT, MEDIUM, HARD)
+    
+    genTyreCompound: lista de compuestos por vuelta usando enteros
+    Mapeo: 0=SOFT, 1=MEDIUM, 2=HARD
     """
     genTyreCompound = []
     PitStop = []
@@ -117,7 +119,12 @@ def validar_estrategia(individual):
     return True
 
 def format_strategy_short(ind):
-    """Formatea la estrategia en una línea corta mostrando cada stint"""
+    """Formatea la estrategia en una línea corta mostrando cada stint
+    
+    Mapeo: 0=SOFT, 1=MEDIUM, 2=HARD
+    """
+    compound_map = {0: "SOFT", 1: "MEDIUM", 2: "HARD"}
+    
     stints = []
     current_compound = ind[0][0]
     stint_length = 1
@@ -125,14 +132,16 @@ def format_strategy_short(ind):
     for lap in range(1, len(ind[0])):
         if ind[0][lap] != current_compound:
             # Nuevo stint
-            stints.append(f"{current_compound}({stint_length})")
+            compound_name = compound_map.get(current_compound, "UNKNOWN")
+            stints.append(f"{compound_name}({stint_length})")
             current_compound = ind[0][lap]
             stint_length = 1
         else:
             stint_length += 1
     
     # Agregar el último stint
-    stints.append(f"{current_compound}({stint_length})")
+    compound_name = compound_map.get(current_compound, "UNKNOWN")
+    stints.append(f"{compound_name}({stint_length})")
     
     # Formato: "HARD(37) → SOFT(16) → HARD(5)"
     strategy_str = " → ".join(stints)
@@ -141,7 +150,11 @@ def format_strategy_short(ind):
 def debug_predictions(individual, max_laps_to_show=10):
     """
     Función de debugging para mostrar predicciones detalladas de una estrategia
+    
+    Mapeo: 0=SOFT, 1=MEDIUM, 2=HARD
     """
+    compound_map = {0: "SOFT", 1: "MEDIUM", 2: "HARD"}
+    
     print("\n" + "="*60)
     print("DEBUG: Predicciones detalladas de la estrategia")
     print("="*60)
@@ -160,7 +173,8 @@ def debug_predictions(individual, max_laps_to_show=10):
     
     for lap in laps_to_show:
         fuel_load = 1.0 - (lap / CANT_VUELTAS)
-        compound = individual[0][lap]
+        compound_int = individual[0][lap]
+        compound = compound_map.get(compound_int, "MEDIUM")  # Convertir a string
         tyre_life = individual.TyreAge[lap]
         
         try:
@@ -172,7 +186,7 @@ def debug_predictions(individual, max_laps_to_show=10):
             # Obtener features usadas
             features_dict = create_features_for_lap(lap, compound, tyre_life, fuel_load, reference_conditions)
             
-            features_str = f"T²={features_dict['TyreLifeSquared']:4d} T³={features_dict['TyreLifeCubed']:5d} "
+            features_str = f"T²={features_dict.get('TyreLifeSquared', 0):4d} T³={features_dict.get('TyreLifeCubed', 0):5d} "
             features_str += f"T×C={features_dict['TyreLifeByCompound']:3.1f}"
             
             print(f"{lap:<4} {compound:<8} {tyre_life:<9} {fuel_load:<6.2f} {lap_time:<8.3f} {features_str}")
@@ -189,7 +203,12 @@ def func_aptitud(individual):
     por lo que aprenderá implícitamente que neumáticos más viejos son peores.
     No hay penalizaciones explícitas: el algoritmo debe aprender por sí solo
     qué estrategias son racionales basándose únicamente en las predicciones del modelo.
+    
+    Mapeo de compuestos: 0=SOFT, 1=MEDIUM, 2=HARD
     """
+    # Mapeo de enteros a nombres de compuestos
+    compound_map = {0: "SOFT", 1: "MEDIUM", 2: "HARD"}
+    
     # Validar primero
     individual.Valid = validar_estrategia(individual)
     
@@ -203,7 +222,8 @@ def func_aptitud(individual):
         fuel_load = 1.0 - (lap / CANT_VUELTAS)
         
         # Obtener datos de la vuelta
-        compound = individual[0][lap]
+        compound_int = individual[0][lap]
+        compound = compound_map.get(compound_int, "MEDIUM")  # Convertir a string
         tyre_life = individual.TyreAge[lap]
         is_pit = individual.PitStop[lap]
         
@@ -631,6 +651,8 @@ if __name__ == '__main__':
     print("="*60 + "\n")
     
     # Guardar estrategia
+    compound_map = {0: "SOFT", 1: "MEDIUM", 2: "HARD"}
+    
     output_file = f"best_strategy_{YEAR}_{GP}.txt"
     with open(output_file, 'w') as f:
         f.write(f"MEJOR ESTRATEGIA - {YEAR} {GP} ({metadata['circuit']})\n")
@@ -647,7 +669,8 @@ if __name__ == '__main__':
         for lap in range(1, CANT_VUELTAS + 1):
             if lap == CANT_VUELTAS or best[0][lap] != current_compound:
                 stint_length = lap - stint_start
-                f.write(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {current_compound}\n")
+                compound_name = compound_map.get(current_compound, "UNKNOWN")
+                f.write(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {compound_name}\n")
                 
                 if lap < CANT_VUELTAS:
                     current_compound = best[0][lap]
