@@ -11,7 +11,7 @@ CANT_VUELTAS = 53  # Número de vueltas en la carrera
 
 # Parámetros del algoritmo evolutivo
 POP_SIZE = 200
-NGEN = 200
+NGEN = 1000
 PMUT = 0.90
 
 # Tiempo de pit stop 
@@ -124,8 +124,8 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "Compound": compound,
         # Neumáticos básicas
         "TyreLife": tyre_life,
-        "TyreLifeSquared": tyre_life ** 2,
-        "TyreLifeCubed": tyre_life ** 3,
+        #"TyreLifeSquared": tyre_life ** 2,
+        #"TyreLifeCubed": tyre_life ** 3,
         
         # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
         # Esta feature permite al modelo aprender diferentes tasas de degradación por compuesto
@@ -136,9 +136,9 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
         "FuelPenalty": fuel_load * 3.0,
         
         # Temperatura
-        "TrackTemp": conditions["TrackTemp"],
-        "AirTemp": conditions["AirTemp"],
-        "Humidity": conditions["Humidity"],
+        #"TrackTemp": conditions["TrackTemp"],
+        #"AirTemp": conditions["AirTemp"],
+        #"Humidity": conditions["Humidity"],
     }
     
     return features_dict

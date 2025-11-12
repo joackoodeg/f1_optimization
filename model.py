@@ -108,6 +108,25 @@ print(f"  Train: {len(train_data)} laps (100% de los datos)\n")
 print("[4/4] Feature engineering...")
 train_data = create_features(train_data)
 
+# OPCIÓN: Eliminar features de temperatura para que el modelo se enfoque en degradación
+# Las temperaturas varían mucho entre años (30-49°C) y dominan la predicción
+# Al eliminarlas, forzamos al modelo a aprender de TyreLife y Compound
+NORMALIZE_TEMPERATURES = True
+
+if NORMALIZE_TEMPERATURES:
+    print("  [EXPERIMENTAL] Normalizando temperaturas para reducir variabilidad...")
+    
+    # Reemplazar temperaturas variables por valores constantes (de referencia 2025)
+    # Esto obliga al modelo a aprender degradación en lugar de temperatura
+    train_data['TrackTemp'] = 42.8  # Temperatura de referencia (2025 Monza Q)
+    train_data['AirTemp'] = 26.6    # Temperatura de referencia (2025 Monza Q)
+    train_data['Humidity'] = 35.8   # Humedad de referencia (2025 Monza Q)
+    
+    print(f"    ✓ Temperaturas fijadas a valores de referencia (2025 Monza Qualifying)")
+    print(f"      Pista: 42.8°C | Aire: 26.6°C | Humedad: 35.8%")
+    print(f"    → Esto obliga al modelo a aprender degradación en lugar de temperatura")
+print()
+
 # Verificación final: asegurar que solo tenemos datos de carrera
 if 'SessionType' in train_data.columns:
     non_race_train = train_data[train_data['SessionType'] != 'R']
@@ -135,13 +154,14 @@ features = [
     # SessionType ELIMINADA: Solo usamos datos de carrera (SessionType="R"), por lo que es constante
     # Team ELIMINADA: No es relevante para predecir degradación de neumáticos
     # Neumáticos básicas
-    "TyreLife", "TyreLifeSquared", "TyreLifeCubed",
+    "TyreLife", 
+    #"TyreLifeSquared", "TyreLifeCubed",
     # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
     "TyreLifeByCompound",
     # Combustible
-    "FuelLoad", "FuelPenalty",
+    "FuelLoad",
     # Temperatura (mantener porque varían entre carreras)
-    "TrackTemp", "AirTemp", "Humidity"
+    #"TrackTemp", "AirTemp", "Humidity"
     # Telemetría ELIMINADA: MaxSpeed, AvgSpeed, AvgThrottle
     # Features redundantes ELIMINADAS: TyreWearRate, RelativeTyreAge, CompoundHardness, SoftDegradation, SessionType, Team
 ]
@@ -159,7 +179,8 @@ X_train[numerical_features] = X_train[numerical_features].fillna(X_train[numeric
 
 # Debug: Verificar variación de features
 print("Variación de features en el conjunto de entrenamiento:")
-varying_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound', 'FuelLoad', 'FuelPenalty']
+varying_features = [#'TyreLifeSquared', 'TyreLifeCubed',
+                    'TyreLife', 'TyreLifeByCompound', 'FuelLoad']
 constant_features = ['TrackTemp', 'AirTemp', 'Humidity']
 for feat_name in varying_features + constant_features:
     if feat_name in X_train.columns:
@@ -206,9 +227,128 @@ for feat_name in varying_features + constant_features:
         print(f"  {feat_name}: corr={corr:.4f}")
 print()
 
+# ANÁLISIS CRÍTICO: Verificar que la degradación esté presente en los datos
+print("="*60)
+print("ANÁLISIS DE DEGRADACIÓN EN LOS DATOS")
+print("="*60)
+print("\nVERIFICANDO PATRÓN DE DEGRADACIÓN:")
+print("(Esperado: tiempos más lentos con más TyreLife)\n")
+
+# Análisis SIN normalizar (raw)
+print("1. ANÁLISIS SIN NORMALIZAR (puede estar afectado por combustible):")
+print("-" * 60)
+for compound in ['SOFT', 'MEDIUM', 'HARD']:
+    compound_data = train_data[train_data['Compound'] == compound].copy()
+    if len(compound_data) < 50:
+        continue
+    
+    # Dividir en 5 bins de TyreLife
+    compound_data['TyreLifeBin'] = pd.cut(compound_data['TyreLife'], bins=5, labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado'])
+    
+    print(f"\n{compound}:")
+    bin_stats = compound_data.groupby('TyreLifeBin')['LapTimeSec'].agg(['count', 'mean', 'std'])
+    print(bin_stats)
+    
+    # Calcular diferencia entre muy nuevo y muy usado
+    if 'Muy nuevo' in bin_stats.index and 'Muy usado' in bin_stats.index:
+        diff = bin_stats.loc['Muy usado', 'mean'] - bin_stats.loc['Muy nuevo', 'mean']
+        print(f"  → Degradación aparente: {diff:.3f}s ({diff*1000:.0f}ms)")
+        if diff < 0:
+            print(f"  ⚠️  NEGATIVA - probablemente dominada por efecto de combustible")
+
+# Análisis NORMALIZADO por combustible
+print("\n\n2. ANÁLISIS NORMALIZADO (eliminando efecto de combustible):")
+print("-" * 60)
+print("Restando la penalización de combustible para aislar degradación pura\n")
+
+degradation_detected = {}
+for compound in ['SOFT', 'MEDIUM', 'HARD']:
+    compound_data = train_data[train_data['Compound'] == compound].copy()
+    if len(compound_data) < 50:
+        continue
+    
+    # NORMALIZAR: Restar efecto de combustible (3s por carga completa)
+    # LapTime normalizado = LapTime real - penalización de combustible
+    compound_data['LapTimeNormalized'] = compound_data['LapTimeSec'] - (compound_data['FuelLoad'] * 3.0)
+    
+    # Dividir en bins de TyreLife
+    compound_data['TyreLifeBin'] = pd.cut(compound_data['TyreLife'], bins=5, labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado'])
+    
+    print(f"\n{compound}:")
+    bin_stats = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['count', 'mean', 'std'])
+    print(bin_stats)
+    
+    # Calcular degradación real
+    if 'Muy nuevo' in bin_stats.index and 'Muy usado' in bin_stats.index:
+        diff = bin_stats.loc['Muy usado', 'mean'] - bin_stats.loc['Muy nuevo', 'mean']
+        print(f"  → Degradación REAL (sin combustible): {diff:.3f}s ({diff*1000:.0f}ms)")
+        degradation_detected[compound] = diff
+        
+        if diff < 0:
+            print(f"  ⚠️  ADVERTENCIA: Degradación NEGATIVA incluso sin combustible.")
+        elif diff < 0.3:
+            print(f"  ⚠️  ADVERTENCIA: Degradación muy baja ({diff:.3f}s).")
+        else:
+            print(f"  ✓ Degradación detectada correctamente.")
+
+# Resumen
+print("\n" + "="*60)
+print("RESUMEN DE DEGRADACIÓN DETECTADA:")
+print("="*60)
+for compound, deg in degradation_detected.items():
+    status = "✓" if deg > 0.3 else "⚠️"
+    print(f"  {status} {compound:8s}: {deg:+.3f}s ({deg*1000:+.0f}ms)")
+
+# Verificar si el modelo puede aprender degradación
+avg_degradation = np.mean(list(degradation_detected.values()))
+print(f"\n  Degradación promedio: {avg_degradation:.3f}s")
+if avg_degradation < 0.1:
+    print("  ❌ PROBLEMA: Degradación muy baja. El modelo no podrá aprender correctamente.")
+    print("     → Posibles causas:")
+    print("       - Datos muy filtrados (eliminamos las vueltas con degradación)")
+    print("       - Mezcla de condiciones muy diferentes entre años")
+    print("       - pick_quicklaps() elimina vueltas lentas (las más degradadas)")
+elif avg_degradation < 0.3:
+    print("  ⚠️  ADVERTENCIA: Degradación baja. El modelo tendrá dificultad para aprender.")
+else:
+    print("  ✓ Degradación suficiente para que el modelo aprenda correctamente.")
+
+# ANÁLISIS ADICIONAL: Verificar outliers en "Muy usado" de HARD
+print("\n" + "="*60)
+print("ANÁLISIS DETALLADO DE DATOS SOSPECHOSOS")
+print("="*60)
+
+# Verificar el bin "Muy usado" de HARD que mostró degradación negativa
+hard_data = train_data[train_data['Compound'] == 'HARD'].copy()
+if len(hard_data) > 0:
+    # Crear bins
+    hard_data['TyreLifeBin'] = pd.cut(hard_data['TyreLife'], bins=5, labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado'])
+    
+    # Analizar el bin "Muy usado"
+    muy_usado = hard_data[hard_data['TyreLifeBin'] == 'Muy usado']
+    
+    if len(muy_usado) > 0:
+        print(f"\nHARD - Bin 'Muy usado' (n={len(muy_usado)}):")
+        print(f"  TyreLife range: [{muy_usado['TyreLife'].min():.0f}, {muy_usado['TyreLife'].max():.0f}]")
+        print(f"  LapTimeSec:     mean={muy_usado['LapTimeSec'].mean():.3f}s, std={muy_usado['LapTimeSec'].std():.3f}s")
+        print(f"  FuelLoad:       mean={muy_usado['FuelLoad'].mean():.3f}, std={muy_usado['FuelLoad'].std():.3f}")
+        
+        # Verificar si hay un patrón de combustible bajo
+        low_fuel_pct = (muy_usado['FuelLoad'] < 0.2).sum() / len(muy_usado) * 100
+        print(f"  → {low_fuel_pct:.1f}% de vueltas con FuelLoad < 0.2 (final de carrera)")
+        
+        if low_fuel_pct > 50:
+            print(f"  ⚠️  ADVERTENCIA: Muchas vueltas con poco combustible en 'Muy usado'")
+            print(f"      Esto puede sesgar los tiempos hacia valores más rápidos.")
+            print(f"      Solución: Filtrar vueltas por rango de TyreLife más específico.")
+
+print("="*60)
+print()
+
 # Debug: Verificar correlación entre features de neumáticos
 print("Correlación entre features de neumáticos:")
-tyre_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound']
+tyre_features = [#'TyreLifeSquared', 'TyreLifeCubed',
+    'TyreLife', 'TyreLifeByCompound']
 tyre_corr_matrix = train_data[tyre_features].corr()
 print("Matriz de correlación:")
 for i, feat1 in enumerate(tyre_features):
@@ -283,8 +423,9 @@ for idx in top_indices:
 print()
 
 # Mostrar todas las features que varían y su importancia
-print("Features que varían (TyreLife, TyreLifeSquared, FuelLoad, etc.):")
-varying_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound', 'FuelLoad', 'FuelPenalty']
+print("Features que varían (TyreLife, TyreLifeByCompound, FuelLoad, etc.):")
+varying_features = [#'TyreLifeSquared', 'TyreLifeCubed', 
+    'TyreLife', 'TyreLifeByCompound', 'FuelLoad']
 for feat_name in varying_features:
     if feat_name in feature_names_after_preprocessing:
         idx = feature_names_after_preprocessing.index(feat_name)

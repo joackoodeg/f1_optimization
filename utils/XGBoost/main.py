@@ -23,7 +23,9 @@ os.makedirs(models_dir, exist_ok=True)
 
 year = 2025
 gp = "Monza"
-historical_years = [2024, 2023, 2022] 
+# Reducir a años más recientes para tener condiciones más homogéneas
+# Más datos no siempre es mejor si las condiciones son muy diferentes
+historical_years = [2024, 2023, 2022]  # Solo 3 años más recientes
 top_n_drivers = 25  
 FORCE_RETRAIN = True
 MODEL_FILENAME = f"model_{year}_gp{gp}.pkl"
@@ -166,7 +168,7 @@ def detect_outliers_iqr(df, column='LapTimeSec', factor=2.0, protect_pitstops=Tr
     return df[mask]
 
 def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
-    """Carga datos de sesión (versión simplificada)"""
+    """Carga datos de sesión con filtros avanzados para eliminar ruido"""
     try:
         session = fastf1.get_session(year, gp, session_type)
         session.load()
@@ -183,15 +185,41 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
     
     all_laps = []
     
+    # Estadísticas de filtrado
+    filter_stats = {
+        'total': 0,
+        'not_quicklaps': 0,
+        'wet_tyres': 0,
+        'sc_vsc': 0,
+        'yellow_flags': 0,
+        'first_lap_stint': 0,
+        'time_range': 0,
+        'pit_outlap': 0,
+        'outliers': 0,
+        'final': 0
+    }
+    
     for driver in drivers:
         try:
-            # Solo vueltas rápidas
-            laps = session.laps.pick_driver(driver).pick_quicklaps()
+            # Cargar todas las vueltas del driver
+            laps = session.laps.pick_driver(driver)
+            filter_stats['total'] += len(laps)
+            
             if len(laps) == 0:
                 continue
             
-            # Solo neumáticos secos
+            # 1. FILTRO CRÍTICO: Solo quicklaps (vueltas rápidas y válidas)
+            # Este filtro elimina: outlaps, inlaps, vueltas con errores, pit stops, etc.
+            laps_before = len(laps)
+            laps = laps.pick_quicklaps()
+            filter_stats['not_quicklaps'] += (laps_before - len(laps))
+            if len(laps) == 0:
+                continue
+            
+            # 2. Solo neumáticos secos
+            laps_before = len(laps)
             laps = laps[laps["Compound"].isin(["SOFT", "MEDIUM", "HARD"])]
+            filter_stats['wet_tyres'] += (laps_before - len(laps))
             if len(laps) == 0:
                 continue
             
@@ -205,47 +233,11 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
                 laps["AirTemp"] = 25.0
                 laps["Humidity"] = 50.0
             
-            # Team
-            try:
-                team = session.results[session.results["Abbreviation"] == driver]["TeamName"].iloc[0]
-                laps["Team"] = team
-            except:
-                laps["Team"] = "Unknown"
-            
-            # Telemetría básica
-            print(f"    {driver}...", end=" ")
-            telemetry_list = []
-            
-            for idx in laps.index:
-                try:
-                    telem = laps.loc[idx].get_car_data()
-                    if telem is not None and len(telem) > 0:
-                        telemetry_list.append({
-                            'MaxSpeed': telem['Speed'].max(),
-                            'AvgSpeed': telem['Speed'].mean(),
-                            'AvgThrottle': telem['Throttle'].mean()
-                        })
-                    else:
-                        telemetry_list.append({
-                            'MaxSpeed': 300.0,
-                            'AvgSpeed': 200.0,
-                            'AvgThrottle': 70.0
-                        })
-                except:
-                    telemetry_list.append({
-                        'MaxSpeed': 300.0,
-                        'AvgSpeed': 200.0,
-                        'AvgThrottle': 70.0
-                    })
-            
-            telem_df = pd.DataFrame(telemetry_list, index=laps.index)
-            laps = pd.concat([laps.reset_index(drop=True), telem_df.reset_index(drop=True)], axis=1)
-            
             # Features básicas
+            print(f"    {driver}...", end=" ")
             required = [
                 "LapTime", "LapNumber", "TyreLife", "Compound", 
-                "TrackTemp", "AirTemp", "Humidity", "TrackStatus", "Team",
-                "MaxSpeed", "AvgSpeed", "AvgThrottle"
+                "TrackTemp", "AirTemp", "Humidity", "TrackStatus"
             ]
             
             laps = laps[required].dropna()
@@ -255,12 +247,35 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             # Añadir columna Driver para preservar continuidad por driver
             laps["Driver"] = driver
             
-            # Flags y conversiones
-            laps["IsSC"] = laps["TrackStatus"].apply(lambda x: 1 if "4" in str(x) or "5" in str(x) else 0)
+            # === FILTROS AVANZADOS PARA ELIMINAR RUIDO ===
+            
+            # TrackStatus códigos:
+            # "1" = Track clear (verde)
+            # "2" = Bandera amarilla
+            # "4" = Safety Car
+            # "5" = Bandera roja
+            # "6" = Virtual Safety Car (VSC)
+            # "7" = VSC ending
+            laps_before = len(laps)
+            laps["IsSC"] = laps["TrackStatus"].apply(
+                lambda x: 1 if any(flag in str(x) for flag in ["4", "5", "6", "7"]) else 0
+            )
+            laps = laps[laps["IsSC"] == 0]
+            filter_stats['sc_vsc'] += (laps_before - len(laps))
+            
+            # 4. Banderas amarillas (pueden indicar tráfico, accidentes, etc.)
+            laps_before = len(laps)
+            laps["IsYellow"] = laps["TrackStatus"].apply(lambda x: 1 if "2" in str(x) else 0)
+            laps = laps[laps["IsYellow"] == 0]
+            filter_stats['yellow_flags'] += (laps_before - len(laps))
+            
+            if len(laps) == 0:
+                continue
+            
+            # 5. Convertir LapTime a segundos ANTES de filtros de tiempo
             laps["LapTimeSec"] = laps["LapTime"].dt.total_seconds()
             laps["SessionType"] = session_type
             
-            # Combustible estimado
             if session_type == "R":
                 total = session.laps["LapNumber"].max()
                 laps["FuelLoad"] = 1.0 - (laps["LapNumber"] / total)
@@ -271,31 +286,64 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             else:
                 laps["FuelLoad"] = 0.5
             
-            # Filtros
-            laps = laps[(laps["IsSC"] == 0) & (laps["LapTimeSec"].between(60, 120))]
+            # 7. Primera vuelta de cada stint (neumáticos fríos)
+            # Eliminar primera vuelta con neumáticos nuevos (outlap efectivamente)
+            laps_before = len(laps)
+            laps = laps[laps["TyreLife"] > 1]
+            filter_stats['first_lap_stint'] += (laps_before - len(laps))
+            
+            if len(laps) == 0:
+                continue
+            
+            # 8. Filtro de tiempo razonable (60-120 segundos)
+            # pick_quicklaps() ya debería haber eliminado la mayoría, pero aseguramos
+            laps_before = len(laps)
+            laps = laps[laps["LapTimeSec"].between(60, 120)]
+            filter_stats['time_range'] += (laps_before - len(laps))
+            
+            if len(laps) == 0:
+                continue
             
             # Ordenar por número de vuelta para preservar continuidad
             if len(laps) > 0 and 'LapNumber' in laps.columns:
                 laps = laps.sort_values('LapNumber').reset_index(drop=True)
             
-            # Outliers: proteger pitstops y preservar continuidad de degradación
+            # 9. Outliers: proteger pitstops y preservar continuidad de degradación
+            # IMPORTANTE: Factor 2.0 (estricto) porque pick_quicklaps() ya limpió mucho
             if len(laps) > 10:
+                laps_before = len(laps)
                 laps = detect_outliers_iqr(
                     laps, 
                     column='LapTimeSec', 
-                    factor=2.0, 
+                    factor=2.0,  # Más estricto porque pick_quicklaps() ya filtró
                     protect_pitstops=True, 
                     preserve_continuity=True
                 )
+                filter_stats['outliers'] += (laps_before - len(laps))
             
-            all_laps.append(laps)
+            if len(laps) > 0:
+                all_laps.append(laps)
+                filter_stats['final'] += len(laps)
             
-        except:
+        except Exception as e:
             continue
     
     if all_laps:
         print()
         combined = pd.concat(all_laps, ignore_index=True)
+        
+        # Mostrar estadísticas de filtrado
+        print(f"    [FILTROS APLICADOS]")
+        print(f"      Total vueltas:           {filter_stats['total']}")
+        print(f"      - No quicklaps:          {filter_stats['not_quicklaps']} ({filter_stats['not_quicklaps']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Neumáticos mojados:    {filter_stats['wet_tyres']} ({filter_stats['wet_tyres']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - SC/VSC/Bandera roja:   {filter_stats['sc_vsc']} ({filter_stats['sc_vsc']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Banderas amarillas:    {filter_stats['yellow_flags']} ({filter_stats['yellow_flags']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Primera vuelta stint:  {filter_stats['first_lap_stint']} ({filter_stats['first_lap_stint']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Fuera rango tiempo:    {filter_stats['time_range']} ({filter_stats['time_range']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Outliers:              {filter_stats['outliers']} ({filter_stats['outliers']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      = Vueltas finales:       {filter_stats['final']} ({filter_stats['final']/max(filter_stats['total'], 1)*100:.1f}%)\n")
+        
         return combined, drivers
     else:
         print()
@@ -330,9 +378,262 @@ def create_features(df):
     
     return df
 
+def analyze_degradation(df):
+    """Analiza el patrón de degradación en los datos"""
+    print("\n" + "="*60)
+    print("ANÁLISIS DE DEGRADACIÓN EN LOS DATOS")
+    print("="*60)
+    print("\nVERIFICANDO PATRÓN DE DEGRADACIÓN:")
+    print("(Esperado: tiempos más lentos con más TyreLife)")
+    
+    # Crear bins de TyreLife
+    df['TyreLifeBin'] = pd.cut(
+        df['TyreLife'],
+        bins=[0, 5, 15, 25, 35, 100],
+        labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado']
+    )
+    
+    print("\n1. ANÁLISIS SIN NORMALIZAR (puede estar afectado por combustible):")
+    print("-" * 60)
+    
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = df[df['Compound'] == compound]
+        if len(compound_data) == 0:
+            continue
+        
+        grouped = compound_data.groupby('TyreLifeBin')['LapTimeSec'].agg(['count', 'mean', 'std'])
+        print(f"\n{compound}:")
+        print(grouped)
+        
+        if len(grouped) >= 2:
+            degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
+            print(f"  → Degradación aparente: {degradation:.3f}s ({degradation*1000:.0f}ms)")
+            if degradation < 0:
+                print(f"  ⚠  NEGATIVA - probablemente dominada por efecto de combustible")
+    
+    print("\n\n2. ANÁLISIS NORMALIZADO (eliminando efecto de combustible):")
+    print("-" * 60)
+    print("Restando la penalización de combustible para aislar degradación pura\n")
+    
+    # Crear tiempo normalizado
+    df['LapTimeNormalized'] = df['LapTimeSec'] - df['FuelPenalty']
+    
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = df[df['Compound'] == compound]
+        if len(compound_data) == 0:
+            continue
+        
+        grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['count', 'mean', 'std'])
+        print(f"\n{compound}:")
+        print(grouped)
+        
+        if len(grouped) >= 2:
+            degradation_real = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
+            print(f"  → Degradación REAL (sin combustible): {degradation_real:.3f}s ({degradation_real*1000:.0f}ms)")
+            if degradation_real > 0:
+                print(f"  ✓ Degradación detectada correctamente.")
+            else:
+                print(f"  ⚠  ADVERTENCIA: Degradación aún negativa. Revisar datos.")
+    
+    # Resumen
+    print("\n" + "="*60)
+    print("RESUMEN DE DEGRADACIÓN DETECTADA:")
+    print("="*60)
+    
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = df[df['Compound'] == compound]
+        if len(compound_data) == 0:
+            continue
+        
+        grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['mean'])
+        if len(grouped) >= 2:
+            degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
+            sign = "✓" if degradation > 0 else "⚠"
+            print(f"  {sign} {compound:7s}: +{degradation:.3f}s (+{degradation*1000:.0f}ms)")
+    
+    # Calcular degradación promedio
+    all_degradations = []
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = df[df['Compound'] == compound]
+        if len(compound_data) > 0:
+            grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['mean'])
+            if len(grouped) >= 2:
+                degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
+                all_degradations.append(degradation)
+    
+    if all_degradations:
+        avg_degradation = np.mean(all_degradations)
+        print(f"\n  Degradación promedio: {avg_degradation:.3f}s")
+        if avg_degradation > 0.3:  # Si la degradación promedio es > 0.3s
+            print(f"  ✓ Degradación suficiente para que el modelo aprenda correctamente.")
+        else:
+            print(f"  ⚠  ADVERTENCIA: Degradación muy baja. El modelo puede no aprender bien.")
+    
+    # Análisis detallado de bins sospechosos
+    print("\n" + "="*60)
+    print("ANÁLISIS DETALLADO DE DATOS SOSPECHOSOS")
+    print("="*60)
+    
+    for compound in ['SOFT', 'MEDIUM', 'HARD']:
+        compound_data = df[df['Compound'] == compound]
+        if len(compound_data) == 0:
+            continue
+        
+        for bin_name in ['Muy usado', 'Usado']:
+            bin_data = compound_data[compound_data['TyreLifeBin'] == bin_name]
+            if len(bin_data) > 0:
+                # Verificar si hay muchas vueltas con poco combustible
+                low_fuel = (bin_data['FuelLoad'] < 0.2).sum()
+                pct_low_fuel = low_fuel / len(bin_data) * 100
+                
+                if pct_low_fuel > 80:  # Si >80% tienen poco combustible
+                    print(f"\n{compound} - Bin '{bin_name}' (n={len(bin_data)}):")
+                    print(f"  TyreLife range: [{bin_data['TyreLife'].min()}, {bin_data['TyreLife'].max()}]")
+                    print(f"  LapTimeSec:     mean={bin_data['LapTimeSec'].mean():.3f}s, std={bin_data['LapTimeSec'].std():.3f}s")
+                    print(f"  FuelLoad:       mean={bin_data['FuelLoad'].mean():.3f}, std={bin_data['FuelLoad'].std():.3f}")
+                    print(f"  → {pct_low_fuel:.1f}% de vueltas con FuelLoad < 0.2 (final de carrera)")
+                    print(f"  ⚠  ADVERTENCIA: Muchas vueltas con poco combustible en '{bin_name}'")
+                    print(f"      Esto puede sesgar los tiempos hacia valores más rápidos.")
+                    print(f"      Solución: Filtrar vueltas por rango de TyreLife más específico.")
+    
+    print("="*60)
+    
+    # Análisis de correlación entre features
+    print("\nCorrelación entre features de neumáticos:")
+    tyre_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound']
+    
+    # Crear un subset con solo estas features
+    if all(f in df.columns for f in tyre_features):
+        corr_matrix = df[tyre_features].corr()
+        
+        print("Matriz de correlación:")
+        for i, feat1 in enumerate(tyre_features):
+            for feat2 in tyre_features[i+1:]:
+                corr_val = corr_matrix.loc[feat1, feat2]
+                print(f"  {feat1} <-> {feat2}: {corr_val:.4f}")
+    
+    print("\n" + "="*60)
+
+def train_model(df):
+    """Entrena modelo XGBoost"""
+    print("\n" + "="*60)
+    print("ENTRENANDO MODELO XGBOOST")
+    print("="*60 + "\n")
+    
+    # Features para el modelo
+    feature_cols = [
+        'TyreLife',
+        'TyreLifeSquared',
+        'TyreLifeCubed',
+        'TyreLifeByCompound',
+        'FuelLoad',
+        'FuelPenalty',
+        'TrackTemp'
+    ]
+    
+    categorical_cols = ['Compound']
+    
+    # Preparar datos
+    X = df[feature_cols + categorical_cols].copy()
+    y = df['LapTimeSec'].copy()
+    
+    # Pipeline de preprocesamiento
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('cat', OneHotEncoder(drop='first', sparse_output=False), categorical_cols)
+        ],
+        remainder='passthrough'
+    )
+    
+    # Modelo XGBoost
+    model = Pipeline([
+        ('preprocessor', preprocessor),
+        ('regressor', XGBRegressor(
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1,
+            random_state=42,
+            n_jobs=-1
+        ))
+    ])
+    
+    print("Entrenando modelo XGBoost...")
+    model.fit(X, y)
+    print("OK Completado")
+    
+    # Obtener feature importance
+    regressor = model.named_steps['regressor']
+    feature_names_encoded = model.named_steps['preprocessor'].get_feature_names_out()
+    
+    importances = regressor.feature_importances_
+    feature_importance_df = pd.DataFrame({
+        'feature': feature_names_encoded,
+        'importance': importances
+    }).sort_values('importance', ascending=False)
+    
+    print("\nTop 10 features con mayor importancia:")
+    for idx, row in feature_importance_df.head(10).iterrows():
+        print(f"  {idx}: {row['feature']} = {row['importance']:.6f}")
+    
+    # Mostrar features que varían (no categóricas)
+    print("\nFeatures que varían (TyreLife, TyreLifeSquared, FuelLoad, etc.):")
+    varying_features = [f for f in feature_importance_df['feature'] if not f.startswith('cat')]
+    for feat in varying_features:
+        imp = feature_importance_df[feature_importance_df['feature'] == feat]['importance'].values[0]
+        idx = feature_importance_df[feature_importance_df['feature'] == feat].index[0]
+        print(f"  {idx}: {feat} = {imp:.6f}")
+    
+    return model, feature_cols + categorical_cols
+
 # Solo ejecutar esto si se ejecuta directamente, no cuando se importa
 if __name__ == "__main__":
     print(f"[I] Circuito: {gp} ({year})")
     target_circuit = get_circuit_name(year, gp)
     print(f"[OK] {target_circuit}\n")
+    
+    # Cargar datos históricos
+    print("="*60)
+    print(f"CARGANDO DATOS HISTÓRICOS ({len(historical_years)} años)")
+    print("="*60)
+    
+    all_data = []
+    
+    for hist_year in historical_years:
+        print(f"\n[{hist_year}] Cargando datos...")
+        race_data, _ = load_session_data(hist_year, gp, 'R', circuit_name=target_circuit)
+        
+        if race_data is not None and len(race_data) > 0:
+            all_data.append(race_data)
+            print(f"  ✓ {len(race_data)} vueltas cargadas")
+    
+    if not all_data:
+        print("\n⚠ ERROR: No se pudieron cargar datos históricos")
+        exit(1)
+    
+    # Combinar todos los datos
+    df_combined = pd.concat(all_data, ignore_index=True)
+    print(f"\n{'='*60}")
+    print(f"DATOS TOTALES: {len(df_combined)} vueltas")
+    print(f"{'='*60}\n")
+    
+    # Crear features
+    df_combined = create_features(df_combined)
+    
+    # Analizar degradación
+    analyze_degradation(df_combined)
+    
+    # Entrenar modelo
+    model, feature_names = train_model(df_combined)
+    
+    # Guardar modelo
+    metadata = {
+        'years': historical_years,
+        'circuit': target_circuit,
+        'n_samples': len(df_combined),
+        'compounds': df_combined['Compound'].unique().tolist()
+    }
+    
+    save_model(model, feature_names, metadata)
+    
+    print("\n✓ Proceso completado exitosamente")
 

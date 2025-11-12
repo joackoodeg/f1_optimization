@@ -1,7 +1,17 @@
 import random
-from ES import CANT_VUELTAS, validar_estrategia, toolbox, creator
+from ES import CANT_VUELTAS, validar_estrategia, toolbox, creator, set_crossover
 
 if __name__ == "__main__":
+    # Ejemplo de cómo usar la función set_crossover
+    print("="*60)
+    print("TEST DE CRUZA")
+    print("="*60)
+    
+    # Puedes activar o desactivar la cruza usando set_crossover()
+    # set_crossover(False)  # Para desactivar la cruza
+    set_crossover(True)     # Para activar la cruza
+    print()
+    
     ind1 = creator.Individual([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]) 
     ind1.PitStop =             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 

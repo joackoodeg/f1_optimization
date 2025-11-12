@@ -21,6 +21,24 @@ from utils.ES.main import (
 # Flag de debugging (cambiar a True para activar debugging detallado)
 DEBUG_MODEL = False
 
+# Flag para activar/desactivar la cruza (cambiar a False para desactivar)
+ENABLE_CROSSOVER = False
+
+def set_crossover(enable):
+    """
+    Activa o desactiva la cruza (crossover) en el algoritmo evolutivo.
+    
+    Args:
+        enable (bool): True para activar la cruza, False para desactivarla
+    
+    Ejemplo:
+        set_crossover(False)  # Desactiva la cruza
+        set_crossover(True)   # Activa la cruza
+    """
+    global ENABLE_CROSSOVER
+    ENABLE_CROSSOVER = enable
+    print(f"Cruza {'ACTIVADA' if ENABLE_CROSSOVER else 'DESACTIVADA'}")
+
 creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
 creator.create("Individual", list, fitness=creator.FitnessMin)
 
@@ -95,15 +113,25 @@ def validar_estrategia(individual):
     return True
 
 def format_strategy_short(ind):
-    """Formatea la estrategia en una línea corta"""
-    compound_counts = {}
-    for compound in ind[0]:
-        compound_counts[compound] = compound_counts.get(compound, 0) + 1
+    """Formatea la estrategia en una línea corta mostrando cada stint"""
+    stints = []
+    current_compound = ind[0][0]
+    stint_length = 1
     
-    # Ordenar compuestos por cantidad (mayor primero)
-    sorted_compounds = sorted(compound_counts.items(), key=lambda x: x[1], reverse=True)
-    # Formato: "1pits: SOFT(71) HARD(7)"
-    strategy_str = f"{ind.NumPitStop}pits: " + " ".join([f"{compound}({count})" for compound, count in sorted_compounds])
+    for lap in range(1, len(ind[0])):
+        if ind[0][lap] != current_compound:
+            # Nuevo stint
+            stints.append(f"{current_compound}({stint_length})")
+            current_compound = ind[0][lap]
+            stint_length = 1
+        else:
+            stint_length += 1
+    
+    # Agregar el último stint
+    stints.append(f"{current_compound}({stint_length})")
+    
+    # Formato: "HARD(37) → SOFT(16) → HARD(5)"
+    strategy_str = " → ".join(stints)
     return strategy_str
 
 def debug_predictions(individual, max_laps_to_show=10):
@@ -243,22 +271,25 @@ def seleccion(population, k):
             mut123.append(ind_aux)
 
     hijos = []
-    for _ in range(1,len(mejoresK)//2):
-        p1,p2 = random.sample(mejoresK,2)
-        hijo1 = toolbox.clone(p1)
-        hijo2 = toolbox.clone(p2) 
-        del hijo1.fitness.values
-        del hijo2.fitness.values
-        
-        if hijo1.NumPitStop == 0 or hijo2.NumPitStop == 0: #Cruzar solo si ambos tienen pit stops
-            continue
+    
+    # Solo realizar cruza si está habilitada
+    if ENABLE_CROSSOVER:
+        for _ in range(1, len(mejoresK)//2):
+            p1, p2 = random.sample(mejoresK, 2)
+            hijo1 = toolbox.clone(p1)
+            hijo2 = toolbox.clone(p2) 
+            del hijo1.fitness.values
+            del hijo2.fitness.values
+            
+            if hijo1.NumPitStop == 0 or hijo2.NumPitStop == 0:  # Cruzar solo si ambos tienen pit stops
+                continue
 
-        toolbox.mate(hijo1,hijo2)
-        
-        if(hijo1.Valid):
-            hijos.append(hijo1)
-        if(hijo2.Valid):    
-            hijos.append(hijo2)
+            toolbox.mate(hijo1, hijo2)
+            
+            if hijo1.Valid:
+                hijos.append(hijo1)
+            if hijo2.Valid:    
+                hijos.append(hijo2)
 
     new_pop = mejoresK + mut1 + mut2 + mut3 + mut123 + hijos
 
@@ -529,6 +560,7 @@ if __name__ == '__main__':
     print("INICIANDO OPTIMIZACIÓN DE ESTRATEGIA")
     print("="*60)
     print(f"Población: {POP_SIZE} | Generaciones: {NGEN}")
+    print(f"Cruza: {'ACTIVADA' if ENABLE_CROSSOVER else 'DESACTIVADA'}")
     print("="*60 + "\n")
     
     #Registrar el map de scoop para paralelización
