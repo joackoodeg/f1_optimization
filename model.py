@@ -213,6 +213,17 @@ for feat_name in varying_features + constant_features:
     if feat_name in train_data_with_target.columns:
         corr = train_data_with_target[feat_name].corr(train_data_with_target['LapTimeSec'])
         print(f"  {feat_name}: corr={corr:.4f}")
+
+# Correlación entre features de neumáticos
+print("\n" + "="*60)
+print("Correlación entre features de neumáticos:")
+print("Matriz de correlación:")
+tyre_features = ['TyreLife', 'TyreLifeByCompound']
+for i, feat1 in enumerate(tyre_features):
+    for feat2 in tyre_features[i+1:]:
+        if feat1 in train_data.columns and feat2 in train_data.columns:
+            corr = train_data[feat1].corr(train_data[feat2])
+            print(f"  {feat1} <-> {feat2}: {corr:.4f}")
 print()
 
 # Análisis de degradación (importado de main.py)

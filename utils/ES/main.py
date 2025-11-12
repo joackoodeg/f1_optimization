@@ -113,7 +113,7 @@ print("="*60 + "\n")
 
 def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditions):
     """
-    Crea features para una vuelta específica, similar a create_features de model_improved_v2.py
+    Crea features para una vuelta específica
     """
     # Mapeo de compuestos
     compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
@@ -122,20 +122,12 @@ def create_features_for_lap(lap_number, compound, tyre_life, fuel_load, conditio
     features_dict = {
         # Categóricas
         "Compound": compound,
-        # Neumáticos básicas
+        # Neumáticos
         "TyreLife": tyre_life,
-        #"TyreLifeSquared": tyre_life ** 2,
-        #"TyreLifeCubed": tyre_life ** 3,
-        
-        # Interacciones compuesto-edad (el modelo aprenderá la degradación naturalmente)
-        # Esta feature permite al modelo aprender diferentes tasas de degradación por compuesto
         "TyreLifeByCompound": tyre_life * compound_hardness,
-        
         # Combustible
         "FuelLoad": fuel_load,
-        "FuelPenalty": fuel_load * 3.0,
-        
-        # Temperatura
+        # Temperatura (comentadas para uso futuro)
         #"TrackTemp": conditions["TrackTemp"],
         #"AirTemp": conditions["AirTemp"],
         #"Humidity": conditions["Humidity"],

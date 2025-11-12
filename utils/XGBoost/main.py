@@ -82,6 +82,8 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
         'yellow_flags': 0,
         'first_lap_stint': 0,
         'time_range': 0,
+        'pit_outlap': 0,
+        'outliers': 0,
         'final': 0
     }
     
@@ -191,9 +193,12 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             if len(laps) == 0:
                 continue
             
-            # Ordenar por número de vuelta
+            # Ordenar por número de vuelta para preservar continuidad
             if len(laps) > 0 and 'LapNumber' in laps.columns:
                 laps = laps.sort_values('LapNumber').reset_index(drop=True)
+            
+            # 9. Outliers: NO SE UTILIZA - pick_quicklaps() ya hizo el trabajo
+            # detect_outliers_iqr() eliminado porque pick_quicklaps() es suficiente
             
             if len(laps) > 0:
                 all_laps.append(laps)
@@ -215,6 +220,7 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
         print(f"      - Banderas amarillas:    {filter_stats['yellow_flags']} ({filter_stats['yellow_flags']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      - Primera vuelta stint:  {filter_stats['first_lap_stint']} ({filter_stats['first_lap_stint']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      - Fuera rango tiempo:    {filter_stats['time_range']} ({filter_stats['time_range']/max(filter_stats['total'], 1)*100:.1f}%)")
+        print(f"      - Outliers:              {filter_stats['outliers']} ({filter_stats['outliers']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      = Vueltas finales:       {filter_stats['final']} ({filter_stats['final']/max(filter_stats['total'], 1)*100:.1f}%)\n")
         
         return combined, drivers
@@ -244,12 +250,21 @@ def analyze_degradation(df):
     print("\nVERIFICANDO PATRÓN DE DEGRADACIÓN:")
     print("(Esperado: tiempos más lentos con más TyreLife)")
     
-    # Crear bins de TyreLife
-    df['TyreLifeBin'] = pd.cut(
-        df['TyreLife'],
-        bins=[0, 5, 15, 25, 35, 100],
-        labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado']
-    )
+    # Bins adaptativos por compuesto (basados en vida útil real)
+    compound_bins = {
+        'SOFT': {
+            'bins': [0, 5, 10, 15, 20, 30],
+            'labels': ['Muy nuevo (0-5)', 'Nuevo (5-10)', 'Medio (10-15)', 'Usado (15-20)', 'Muy usado (20-30)']
+        },
+        'MEDIUM': {
+            'bins': [0, 5, 12, 20, 30, 45],
+            'labels': ['Muy nuevo (0-5)', 'Nuevo (5-12)', 'Medio (12-20)', 'Usado (20-30)', 'Muy usado (30-45)']
+        },
+        'HARD': {
+            'bins': [0, 5, 15, 25, 35, 55],
+            'labels': ['Muy nuevo (0-5)', 'Nuevo (5-15)', 'Medio (15-25)', 'Usado (25-35)', 'Muy usado (35-55)']
+        }
+    }
     
     print("\nANÁLISIS DE TIEMPOS POR DEGRADACIÓN:")
     print("-" * 60)
@@ -259,15 +274,29 @@ def analyze_degradation(df):
         if len(compound_data) == 0:
             continue
         
+        # Crear bins específicos para este compuesto
+        bins_config = compound_bins[compound]
+        compound_data['TyreLifeBin'] = pd.cut(
+            compound_data['TyreLife'],
+            bins=bins_config['bins'],
+            labels=bins_config['labels']
+        )
+        
         grouped = compound_data.groupby('TyreLifeBin')['LapTimeSec'].agg(['count', 'mean', 'std'])
         print(f"\n{compound}:")
         print(grouped)
         
+        # Calcular degradación usando el último bin con datos válidos
         if len(grouped) >= 2:
-            degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
-            print(f"  → Degradación aparente: {degradation:.3f}s ({degradation*1000:.0f}ms)")
-            if degradation < 0:
-                print(f"  ⚠️  NEGATIVA - dominada por efecto de combustible")
+            # Filtrar bins con datos válidos (count > 0)
+            valid_bins = grouped[grouped['count'] > 0]
+            if len(valid_bins) >= 2:
+                degradation = valid_bins['mean'].iloc[-1] - valid_bins['mean'].iloc[0]
+                print(f"  → Degradación aparente: {degradation:.3f}s ({degradation*1000:.0f}ms)")
+                if degradation < 0:
+                    print(f"  ⚠️  NEGATIVA - dominada por efecto de combustible")
+            else:
+                print(f"  → Degradación aparente: N/A (insuficientes datos)")
     
     # Resumen
     print("\n" + "="*60)
