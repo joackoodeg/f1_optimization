@@ -55,118 +55,6 @@ def get_circuit_name(year, gp):
     except:
         return None
 
-def detect_outliers_iqr(df, column='LapTimeSec', factor=2.0, protect_pitstops=True, preserve_continuity=True):
-    """
-    Detecta y elimina outliers preservando pitstops y continuidad de degradación.
-    
-    Args:
-        df: DataFrame con datos de vueltas
-        column: Columna para detectar outliers
-        factor: Factor IQR para detectar outliers
-        protect_pitstops: Si True, protege vueltas con pitstop de ser eliminadas
-        preserve_continuity: Si True, preserva continuidad de degradación por driver
-    """
-    if len(df) == 0:
-        return df
-    
-    # Detectar pitstops antes de eliminar outliers
-    # Pitstop se detecta cuando TyreLife == 0 o cambia el compuesto
-    if protect_pitstops and 'TyreLife' in df.columns and 'Compound' in df.columns:
-        # Detectar pitstops: TyreLife == 0
-        pitstop_mask = (df['TyreLife'] == 0)
-        
-        # También detectar cambios de compuesto (puede indicar pitstop)
-        if 'LapNumber' in df.columns and 'Driver' in df.columns:
-            # Ordenar por driver y número de vuelta para detectar cambios de compuesto
-            df_sorted_pitstop = df.sort_values(['Driver', 'LapNumber']).copy()
-            # Detectar cambios de compuesto dentro del mismo driver
-            df_sorted_pitstop['CompoundChange'] = (df_sorted_pitstop.groupby('Driver')['Compound'].shift() != df_sorted_pitstop['Compound'])
-            compound_change_mask_sorted = df_sorted_pitstop['CompoundChange'].fillna(False)
-            # Restaurar índice original
-            compound_change_mask = compound_change_mask_sorted.reindex(df.index).fillna(False)
-            pitstop_mask = pitstop_mask | compound_change_mask
-        
-        n_pitstops = pitstop_mask.sum()
-    else:
-        pitstop_mask = pd.Series([False] * len(df), index=df.index)
-        n_pitstops = 0
-    
-    # Calcular límites IQR
-    Q1 = df[column].quantile(0.25)
-    Q3 = df[column].quantile(0.75)
-    IQR = Q3 - Q1
-    
-    lower = Q1 - factor * IQR
-    upper = Q3 + factor * IQR
-    
-    # Detectar outliers
-    outlier_mask = (df[column] < lower) | (df[column] > upper)
-    
-    # Proteger pitstops: no eliminar vueltas con pitstop aunque sean outliers
-    if protect_pitstops:
-        outlier_mask = outlier_mask & ~pitstop_mask
-    
-    # Preservar continuidad de degradación por driver
-    if preserve_continuity and 'Driver' in df.columns and 'LapNumber' in df.columns and 'TyreLife' in df.columns:
-        # Ordenar por driver y número de vuelta
-        df_sorted = df.sort_values(['Driver', 'LapNumber']).copy()
-        
-        # Crear máscara de outliers en el orden ordenado
-        outlier_mask_sorted = outlier_mask.reindex(df_sorted.index)
-        
-        # Para cada driver, verificar continuidad de TyreLife
-        protected_indices = set()
-        
-        for driver in df_sorted['Driver'].unique():
-            driver_data = df_sorted[df_sorted['Driver'] == driver].copy()
-            if len(driver_data) < 2:
-                continue
-            
-            # Verificar secuencia de TyreLife
-            tyre_life_values = driver_data['TyreLife'].values
-            lap_numbers = driver_data['LapNumber'].values
-            driver_indices = driver_data.index.values
-            
-            # Proteger vueltas que mantienen continuidad
-            for i in range(1, len(tyre_life_values)):
-                prev_tyre_life = tyre_life_values[i-1]
-                curr_tyre_life = tyre_life_values[i]
-                prev_lap = lap_numbers[i-1]
-                curr_lap = lap_numbers[i]
-                
-                # Verificar si la secuencia es continua
-                is_continuous = (
-                    curr_tyre_life == 0 or  # Pitstop (reseteo)
-                    curr_tyre_life == prev_tyre_life + 1 or  # Degradación normal
-                    (curr_lap == prev_lap + 1 and curr_tyre_life >= prev_tyre_life)  # Vuelta siguiente con degradación válida
-                )
-                
-                # Si la secuencia es continua y alguna vuelta está marcada como outlier, proteger ambas
-                if is_continuous:
-                    prev_idx = driver_indices[i-1]
-                    curr_idx = driver_indices[i]
-                    if outlier_mask_sorted.loc[prev_idx] or outlier_mask_sorted.loc[curr_idx]:
-                        protected_indices.add(prev_idx)
-                        protected_indices.add(curr_idx)
-        
-        # No eliminar vueltas protegidas
-        if protected_indices:
-            protected_mask = pd.Series([idx in protected_indices for idx in df.index], index=df.index)
-            outlier_mask = outlier_mask & ~protected_mask
-    
-    # Aplicar máscara
-    mask = ~outlier_mask
-    n_outliers = outlier_mask.sum()
-    
-    if n_outliers > 0:
-        protected_count = n_pitstops if protect_pitstops else 0
-        print(f"    [OUTLIERS] {n_outliers} ({n_outliers/len(df)*100:.1f}%)", end="")
-        if protected_count > 0:
-            print(f" | [PROTECTED] {protected_count} pitstops preservados", end="")
-        print()
-    
-    return df[mask]
-
 def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
     """Carga datos de sesión con filtros avanzados para eliminar ruido"""
     try:
@@ -345,28 +233,12 @@ def create_features(df):
     Features MÍNIMAS y ROBUSTAS
     Solo las que realmente importan
     """
-    # Compuesto numérico (solo para calcular TyreLifeByCompound, no se incluye en features)
+    # Compuesto numérico (solo para calcular TyreLifeByCompound)
     compound_map = {"SOFT": 1, "MEDIUM": 2, "HARD": 3}
     df["CompoundHardness"] = df["Compound"].map(compound_map)
     
-    # Básicas de neumáticos
-    # TyreWearRate ELIMINADA: correlación perfecta (1.0) con TyreLife
-    
-    # Degradación cuadrática
-    df["TyreLifeSquared"] = df["TyreLife"] ** 2
-    
-    # Degradación cúbica (para capturar mejor la degradación no lineal, especialmente en SOFT)
-    df["TyreLifeCubed"] = df["TyreLife"] ** 3
-    
-    # Interacción compuesto-edad (el modelo aprenderá la degradación naturalmente)
-    # Esta feature permite al modelo aprender diferentes tasas de degradación por compuesto
+    # Interacción compuesto-edad (degradación por tipo de neumático)
     df["TyreLifeByCompound"] = df["TyreLife"] * df["CompoundHardness"]
-    
-    # RelativeTyreAge ELIMINADA: correlacionada con TyreLife y CompoundHardness
-    
-    # Combustible - SOLO FuelLoad, SIN FuelPenalty
-    # FuelPenalty ELIMINADO temporalmente para ver comportamiento sin él
-    # df["FuelPenalty"] = df["FuelLoad"] * 3.0
     
     return df
 
@@ -385,7 +257,7 @@ def analyze_degradation(df):
         labels=['Muy nuevo', 'Nuevo', 'Medio', 'Usado', 'Muy usado']
     )
     
-    print("\n1. ANÁLISIS SIN NORMALIZAR (puede estar afectado por combustible):")
+    print("\nANÁLISIS DE TIEMPOS POR DEGRADACIÓN:")
     print("-" * 60)
     
     for compound in ['SOFT', 'MEDIUM', 'HARD']:
@@ -401,103 +273,22 @@ def analyze_degradation(df):
             degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
             print(f"  → Degradación aparente: {degradation:.3f}s ({degradation*1000:.0f}ms)")
             if degradation < 0:
-                print(f"  ⚠  NEGATIVA - probablemente dominada por efecto de combustible")
-    
-    print("\n\n2. ANÁLISIS NORMALIZADO (eliminando efecto de combustible):")
-    print("-" * 60)
-    print("Restando la penalización de combustible para aislar degradación pura\n")
-    
-    # Crear tiempo normalizado
-    df['LapTimeNormalized'] = df['LapTimeSec'] - df['FuelPenalty']
-    
-    for compound in ['SOFT', 'MEDIUM', 'HARD']:
-        compound_data = df[df['Compound'] == compound]
-        if len(compound_data) == 0:
-            continue
-        
-        grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['count', 'mean', 'std'])
-        print(f"\n{compound}:")
-        print(grouped)
-        
-        if len(grouped) >= 2:
-            degradation_real = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
-            print(f"  → Degradación REAL (sin combustible): {degradation_real:.3f}s ({degradation_real*1000:.0f}ms)")
-            if degradation_real > 0:
-                print(f"  ✓ Degradación detectada correctamente.")
-            else:
-                print(f"  ⚠  ADVERTENCIA: Degradación aún negativa. Revisar datos.")
+                print(f"  ⚠️  NEGATIVA - dominada por efecto de combustible")
     
     # Resumen
     print("\n" + "="*60)
-    print("RESUMEN DE DEGRADACIÓN DETECTADA:")
+    print("RESUMEN:")
     print("="*60)
+    print("  Nota: Degradación aparente puede ser negativa debido al efecto")
+    print("  del combustible. El modelo aprenderá ambos efectos por separado.")
     
-    for compound in ['SOFT', 'MEDIUM', 'HARD']:
-        compound_data = df[df['Compound'] == compound]
-        if len(compound_data) == 0:
-            continue
-        
-        grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['mean'])
-        if len(grouped) >= 2:
-            degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
-            sign = "✓" if degradation > 0 else "⚠"
-            print(f"  {sign} {compound:7s}: +{degradation:.3f}s (+{degradation*1000:.0f}ms)")
-    
-    # Calcular degradación promedio
-    all_degradations = []
-    for compound in ['SOFT', 'MEDIUM', 'HARD']:
-        compound_data = df[df['Compound'] == compound]
-        if len(compound_data) > 0:
-            grouped = compound_data.groupby('TyreLifeBin')['LapTimeNormalized'].agg(['mean'])
-            if len(grouped) >= 2:
-                degradation = grouped['mean'].iloc[-1] - grouped['mean'].iloc[0]
-                all_degradations.append(degradation)
-    
-    if all_degradations:
-        avg_degradation = np.mean(all_degradations)
-        print(f"\n  Degradación promedio: {avg_degradation:.3f}s")
-        if avg_degradation > 0.3:  # Si la degradación promedio es > 0.3s
-            print(f"  ✓ Degradación suficiente para que el modelo aprenda correctamente.")
-        else:
-            print(f"  ⚠  ADVERTENCIA: Degradación muy baja. El modelo puede no aprender bien.")
-    
-    # Análisis detallado de bins sospechosos
+    # Análisis de correlación
     print("\n" + "="*60)
-    print("ANÁLISIS DETALLADO DE DATOS SOSPECHOSOS")
-    print("="*60)
+    print("Correlación entre features de neumáticos:")
+    tyre_features = ['TyreLife', 'TyreLifeByCompound']
     
-    for compound in ['SOFT', 'MEDIUM', 'HARD']:
-        compound_data = df[df['Compound'] == compound]
-        if len(compound_data) == 0:
-            continue
-        
-        for bin_name in ['Muy usado', 'Usado']:
-            bin_data = compound_data[compound_data['TyreLifeBin'] == bin_name]
-            if len(bin_data) > 0:
-                # Verificar si hay muchas vueltas con poco combustible
-                low_fuel = (bin_data['FuelLoad'] < 0.2).sum()
-                pct_low_fuel = low_fuel / len(bin_data) * 100
-                
-                if pct_low_fuel > 80:  # Si >80% tienen poco combustible
-                    print(f"\n{compound} - Bin '{bin_name}' (n={len(bin_data)}):")
-                    print(f"  TyreLife range: [{bin_data['TyreLife'].min()}, {bin_data['TyreLife'].max()}]")
-                    print(f"  LapTimeSec:     mean={bin_data['LapTimeSec'].mean():.3f}s, std={bin_data['LapTimeSec'].std():.3f}s")
-                    print(f"  FuelLoad:       mean={bin_data['FuelLoad'].mean():.3f}, std={bin_data['FuelLoad'].std():.3f}")
-                    print(f"  → {pct_low_fuel:.1f}% de vueltas con FuelLoad < 0.2 (final de carrera)")
-                    print(f"  ⚠  ADVERTENCIA: Muchas vueltas con poco combustible en '{bin_name}'")
-                    print(f"      Esto puede sesgar los tiempos hacia valores más rápidos.")
-                    print(f"      Solución: Filtrar vueltas por rango de TyreLife más específico.")
-    
-    print("="*60)
-    
-    # Análisis de correlación entre features
-    print("\nCorrelación entre features de neumáticos:")
-    tyre_features = ['TyreLife', 'TyreLifeSquared', 'TyreLifeCubed', 'TyreLifeByCompound']
-    
-    # Crear un subset con solo estas features
     if all(f in df.columns for f in tyre_features):
         corr_matrix = df[tyre_features].corr()
-        
         print("Matriz de correlación:")
         for i, feat1 in enumerate(tyre_features):
             for feat2 in tyre_features[i+1:]:
@@ -512,14 +303,11 @@ def train_model(df):
     print("ENTRENANDO MODELO XGBOOST")
     print("="*60 + "\n")
     
-    # Features para el modelo (SIN FuelPenalty)
+    # Features para el modelo
     feature_cols = [
         'TyreLife',
-        'TyreLifeSquared',
-        'TyreLifeCubed',
         'TyreLifeByCompound',
         'FuelLoad',
-        # 'FuelPenalty',  # ELIMINADO TEMPORALMENTE
         'TrackTemp'
     ]
     
@@ -567,8 +355,8 @@ def train_model(df):
     for idx, row in feature_importance_df.head(10).iterrows():
         print(f"  {idx}: {row['feature']} = {row['importance']:.6f}")
     
-    # Mostrar features que varían (no categóricas)
-    print("\nFeatures que varían (TyreLife, TyreLifeSquared, FuelLoad, etc.):")
+    # Mostrar features numéricas
+    print("\nFeatures numéricas:")
     varying_features = [f for f in feature_importance_df['feature'] if not f.startswith('cat')]
     for feat in varying_features:
         imp = feature_importance_df[feature_importance_df['feature'] == feat]['importance'].values[0]
