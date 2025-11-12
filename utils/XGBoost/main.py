@@ -82,8 +82,6 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
         'yellow_flags': 0,
         'first_lap_stint': 0,
         'time_range': 0,
-        'pit_outlap': 0,
-        'outliers': 0,
         'final': 0
     }
     
@@ -193,12 +191,9 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
             if len(laps) == 0:
                 continue
             
-            # Ordenar por número de vuelta para preservar continuidad
+            # Ordenar por número de vuelta
             if len(laps) > 0 and 'LapNumber' in laps.columns:
                 laps = laps.sort_values('LapNumber').reset_index(drop=True)
-            
-            # 9. Outliers: NO SE UTILIZA - pick_quicklaps() ya hizo el trabajo
-            # detect_outliers_iqr() eliminado porque pick_quicklaps() es suficiente
             
             if len(laps) > 0:
                 all_laps.append(laps)
@@ -220,7 +215,6 @@ def load_session_data(year, gp, session_type, drivers=None, circuit_name=None):
         print(f"      - Banderas amarillas:    {filter_stats['yellow_flags']} ({filter_stats['yellow_flags']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      - Primera vuelta stint:  {filter_stats['first_lap_stint']} ({filter_stats['first_lap_stint']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      - Fuera rango tiempo:    {filter_stats['time_range']} ({filter_stats['time_range']/max(filter_stats['total'], 1)*100:.1f}%)")
-        print(f"      - Outliers:              {filter_stats['outliers']} ({filter_stats['outliers']/max(filter_stats['total'], 1)*100:.1f}%)")
         print(f"      = Vueltas finales:       {filter_stats['final']} ({filter_stats['final']/max(filter_stats['total'], 1)*100:.1f}%)\n")
         
         return combined, drivers
