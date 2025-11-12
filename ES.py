@@ -127,7 +127,9 @@ def format_strategy_short(ind):
     for lap in range(1, len(ind[0])):
         if ind[0][lap] != current_compound:
             # Nuevo stint
-            compound_name = compound_map.get(current_compound, "UNKNOWN")
+            if current_compound not in compound_map:
+                raise ValueError(f"Compuesto inválido: {current_compound}. Debe ser 0, 1 o 2")
+            compound_name = compound_map[current_compound]
             stints.append(f"{compound_name}({stint_length})")
             current_compound = ind[0][lap]
             stint_length = 1
@@ -135,7 +137,9 @@ def format_strategy_short(ind):
             stint_length += 1
     
     # Agregar el último stint
-    compound_name = compound_map.get(current_compound, "UNKNOWN")
+    if current_compound not in compound_map:
+        raise ValueError(f"Compuesto inválido: {current_compound}. Debe ser 0, 1 o 2")
+    compound_name = compound_map[current_compound]
     stints.append(f"{compound_name}({stint_length})")
     
     # Formato: "HARD(37) → SOFT(16) → HARD(5)"
@@ -169,7 +173,9 @@ def debug_predictions(individual, max_laps_to_show=10):
     for lap in laps_to_show:
         fuel_load = 1.0 - (lap / CANT_VUELTAS)
         compound_int = individual[0][lap]
-        compound = compound_map.get(compound_int, "MEDIUM")  # Convertir a string
+        if compound_int not in compound_map:
+            raise ValueError(f"Compuesto inválido: {compound_int} en vuelta {lap}. Debe ser 0, 1 o 2")
+        compound = compound_map[compound_int]  # Convertir a string
         tyre_life = individual.TyreAge[lap]
         
         try:
@@ -218,7 +224,9 @@ def func_aptitud(individual):
         
         # Obtener datos de la vuelta
         compound_int = individual[0][lap]
-        compound = compound_map.get(compound_int, "MEDIUM")  # Convertir a string
+        if compound_int not in compound_map:
+            raise ValueError(f"Compuesto inválido: {compound_int} en vuelta {lap}. Debe ser 0, 1 o 2")
+        compound = compound_map[compound_int]  # Convertir a string
         tyre_life = individual.TyreAge[lap]
         is_pit = individual.PitStop[lap]
         
@@ -700,7 +708,9 @@ if __name__ == '__main__':
         for lap in range(1, CANT_VUELTAS + 1):
             if lap == CANT_VUELTAS or best[0][lap] != current_compound:
                 stint_length = lap - stint_start
-                compound_name = compound_map.get(current_compound, "UNKNOWN")
+                if current_compound not in compound_map:
+                    raise ValueError(f"Compuesto inválido en mejor estrategia: {current_compound}. Debe ser 0, 1 o 2")
+                compound_name = compound_map[current_compound]
                 f.write(f"Stint {stint_number}: Vueltas {stint_start+1}-{lap} ({stint_length} vueltas) - {compound_name}\n")
                 
                 if lap < CANT_VUELTAS:
